@@ -4,6 +4,10 @@
 export const GRID_SIZE = 15;
 export const TILE_SIZE = 48;
 
+// Isometric tile dimensions (2:1 diamond)
+export const ISO_TILE_W = 64;
+export const ISO_TILE_H = 32;
+
 // Directions
 export type Direction = 'up' | 'down' | 'left' | 'right';
 

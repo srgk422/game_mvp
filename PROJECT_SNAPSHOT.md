@@ -1,6 +1,6 @@
 # Project Snapshot
 
-_Generated: 2026-04-13 21:39_
+_Generated: 2026-04-13 22:11_
 
 ## File tree
 
@@ -139,6 +139,46 @@ _Generated: 2026-04-13 21:39_
 - Таймер мигает красным при `<= 30` секунд, HP-бар меняет цвет при `<= 30%`
 - Оверлей конца игры: полупрозрачный `rgba(0,0,0,0.7)` фон + крупный текст с `text-shadow`
 - Поток данных: `ServerEmulator` → `EventBus(SERVER_UPDATE)` → `App.tsx(useState)` → `HUD(props)`
+
+---
+
+## [0.3.1] — 2026-04-14 (`main`)
+
+### Stalker Rays — предупреждение о параличе в HUD
+
+**Изменены файлы:**
+
+| Файл | Что изменилось |
+|---|---|
+| `src/components/HUD.tsx` | Добавлен пульсирующий текст `SYSTEM FAILURE: PARALYZED` по центру экрана при `player.status === 'PARALYZED'` |
+| `index.html` | Добавлен `@keyframes pulse` для анимации предупреждения |
+
+**Примечание:** Вся серверная логика лучей (LOS, паралич 5 сек, блокировка движения) и визуализация в Phaser (жёлтые лучи с fade-out, смена цвета игрока) были реализованы ранее в `[0.2.0]`.
+
+---
+
+## [0.4.0] — 2026-04-14 (`feature/isometric`)
+
+### Изометрическая проекция + Screen-Aligned управление
+
+Переход с плоского top-down вида на изометрию 2:1 (ромбы 64×32 px).
+
+**Изменены файлы:**
+
+| Файл | Что изменилось |
+|---|---|
+| `src/types/game.ts` | Добавлены константы `ISO_TILE_W = 64`, `ISO_TILE_H = 32` |
+| `src/scenes/Game.ts` | Полный рефактор рендеринга: `tileToWorld()` → `toIso()`, сетка из ромбов, Core как изометрический 2×2 блок, depth sorting по экранному Y, лучи паралича — красные |
+| `src/core/ServerEmulator.ts` | Новый метод `playerStep()` — диагональное движение по логической сетке (W: x-1,y-1; S: x+1,y+1; A: x-1,y+1; D: x+1,y-1); `applyMove()` теперь использует `playerStep()`, враги по-прежнему двигаются кардинально через `step()` |
+
+**Архитектурные решения:**
+- Изометрическая проекция: `toIso(gx, gy)` = `((gx-gy)*32 + 640, (gx+gy)*16 + 136)`, центрирована на канвасе 1280×720
+- Сетка 15×15 ромбов рисуется через `Graphics.strokePoints`, фон — общий ромб
+- Core (тайлы 7,7–8,8) — единый заполненный изометрический четырёхугольник с пульсацией и обводкой
+- Depth sorting: `sprite.depth = screenY` после каждого tween, обеспечивает правильное перекрытие
+- Лучи паралича изменены с жёлтых (`0xffff00`) на красные (`0xff0000`)
+- Управление Screen-Aligned: WASD двигает игрока по диагоналям логической сетки, визуально это выглядит как движение по экранным осям
+- Доступность Core: при диагональном движении игрок может достичь прилегающих тайлов (9,7), (8,6), (6,8), (7,9) для взаимодействия
 ```
 
 ### `index.html`
@@ -159,6 +199,10 @@ _Generated: 2026-04-13 21:39_
       body {
         background: #000;
         overflow: hidden;
+      }
+      @keyframes pulse {
+        from { opacity: 1; }
+        to { opacity: 0.4; }
       }
     </style>
   </head>
@@ -472,6 +516,7 @@ export default function HUD({ state }: HUDProps) {
   if (!state) return null;
 
   const { status, timer, coreHP } = state.room;
+  const isParalyzed = state.player.status === 'PARALYZED';
 
   return (
     <div style={{
@@ -481,6 +526,24 @@ export default function HUD({ state }: HUDProps) {
       fontFamily: 'monospace',
       color: '#fff',
     }}>
+      {/* Paralysis warning */}
+      {isParalyzed && (
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -80%)',
+          fontSize: '28px',
+          fontWeight: 'bold',
+          color: '#ffff00',
+          textShadow: '0 0 20px #ffff00, 0 0 40px rgba(255,255,0,0.4)',
+          animation: 'pulse 0.6s ease-in-out infinite alternate',
+          whiteSpace: 'nowrap',
+        }}>
+          SYSTEM FAILURE: PARALYZED
+        </div>
+      )}
+
       {/* Top bar: timer + core HP */}
       <div style={{
         display: 'flex',
@@ -676,7 +739,7 @@ export class ServerEmulator {
   private applyMove(dir: Direction): void {
     if (this.state.player.status === 'PARALYZED') return;
     const { x, y } = this.state.player;
-    const next = this.step(x, y, dir);
+    const next = this.playerStep(x, y, dir);
     if (!this.isBlocked(next.x, next.y)) {
       this.state.player.x = next.x;
       this.state.player.y = next.y;
@@ -774,6 +837,15 @@ export class ServerEmulator {
     return CORE_TILES.some(t => Math.abs(t.x - x) + Math.abs(t.y - y) === 1);
   }
 
+  /** Screen-aligned diagonal step for the player (iso projection). */
+  private playerStep(x: number, y: number, dir: Direction): { x: number; y: number } {
+    if (dir === 'up')    return { x: x - 1, y: y - 1 };
+    if (dir === 'down')  return { x: x + 1, y: y + 1 };
+    if (dir === 'left')  return { x: x - 1, y: y + 1 };
+    return { x: x + 1, y: y - 1 }; // 'right'
+  }
+
+  /** Cardinal step used for enemy AI movement. */
   private step(x: number, y: number, dir: Direction): { x: number; y: number } {
     if (dir === 'up')    return { x, y: y - 1 };
     if (dir === 'down')  return { x, y: y + 1 };
@@ -840,36 +912,37 @@ export class Boot extends Phaser.Scene {
 import Phaser from 'phaser';
 import { EventBus, Events } from '../core/EventBus';
 import { ServerEmulator } from '../core/ServerEmulator';
-import { GRID_SIZE, TILE_SIZE, GameState, PlayerInput, Ray } from '../types/game';
-const GRID_PX = GRID_SIZE * TILE_SIZE; // 720 px
-const OFFSET_X = (1280 - GRID_PX) / 2; // 280 px — centers grid on 1280-wide canvas
-const OFFSET_Y = (720 - GRID_PX) / 2;  // 0 px  — grid fills full height
+import { GRID_SIZE, ISO_TILE_W, ISO_TILE_H, GameState, PlayerInput, Ray } from '../types/game';
 
-const TWEEN_DURATION = 80; // ms — slightly shorter than server tick (100 ms)
-const RAY_FADE_DURATION = 600; // ms
+const HW = ISO_TILE_W / 2; // 32
+const HH = ISO_TILE_H / 2; // 16
+
+// The 15×15 iso grid spans (14*2)*HW = 896 px wide, (14*2)*HH = 448 px tall.
+const ISO_ORIGIN_X = 640;                   // canvas center X
+const ISO_ORIGIN_Y = (720 - 14 * 2 * HH) / 2; // ≈136 — vertically centers the grid
+
+const TWEEN_DURATION = 80;
+const RAY_FADE_DURATION = 600;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function tileToWorld(col: number, row: number): { x: number; y: number } {
+function toIso(gx: number, gy: number): { x: number; y: number } {
   return {
-    x: OFFSET_X + col * TILE_SIZE + TILE_SIZE / 2,
-    y: OFFSET_Y + row * TILE_SIZE + TILE_SIZE / 2,
+    x: (gx - gy) * HW + ISO_ORIGIN_X,
+    y: (gx + gy) * HH + ISO_ORIGIN_Y,
   };
 }
 
 // ─── Scene ────────────────────────────────────────────────────────────────────
 
 export class Game extends Phaser.Scene {
-  // Server
   private server!: ServerEmulator;
 
-  // Game objects
   private playerRect!: Phaser.GameObjects.Rectangle;
-  private coreRect!: Phaser.GameObjects.Rectangle;
+  private coreGfx!: Phaser.GameObjects.Graphics;
   private enemyRects = new Map<string, Phaser.GameObjects.Rectangle>();
   private raysGraphics!: Phaser.GameObjects.Graphics;
 
-  // Input
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wKey!: Phaser.Input.Keyboard.Key;
   private aKey!: Phaser.Input.Keyboard.Key;
@@ -878,7 +951,6 @@ export class Game extends Phaser.Scene {
   private spaceKey!: Phaser.Input.Keyboard.Key;
   private lastMoveTime = 0;
 
-  // Ray fade
   private cachedRays: Ray[] = [];
   private rayFadeMs = 0;
 
@@ -892,11 +964,10 @@ export class Game extends Phaser.Scene {
     this.drawGrid();
     this.drawCore();
 
-    // Player starts off-screen; first SERVER_UPDATE will position it
-    this.playerRect = this.add.rectangle(-TILE_SIZE, -TILE_SIZE, TILE_SIZE - 8, TILE_SIZE - 8, 0x44aaff);
-    this.playerRect.setDepth(2);
+    this.playerRect = this.add.rectangle(-100, -100, 24, 24, 0x44aaff);
+    this.playerRect.setDepth(0);
 
-    this.raysGraphics = this.add.graphics().setDepth(3);
+    this.raysGraphics = this.add.graphics().setDepth(1000);
 
     this.setupInput();
 
@@ -925,13 +996,11 @@ export class Game extends Phaser.Scene {
   }
 
   private handleInput(time: number): void {
-    // Action: fire on key-down only (no repeat)
     if (Phaser.Input.Keyboard.JustDown(this.spaceKey)) {
       EventBus.emit(Events.PLAYER_INPUT, { type: 'action' } satisfies PlayerInput);
     }
 
-    // Movement: throttled to match server tick rate
-    if (time - this.lastMoveTime < TILE_SIZE * 2) return; // ~100 ms at 60 fps
+    if (time - this.lastMoveTime < 100) return;
 
     let dir: PlayerInput | null = null;
 
@@ -959,13 +1028,16 @@ export class Game extends Phaser.Scene {
   }
 
   private syncPlayer(state: GameState): void {
-    const pos = tileToWorld(state.player.x, state.player.y);
+    const pos = toIso(state.player.x, state.player.y);
     this.tweens.add({
       targets: this.playerRect,
       x: pos.x,
       y: pos.y,
       duration: TWEEN_DURATION,
       ease: 'Linear',
+      onComplete: () => {
+        this.playerRect.setDepth(pos.y);
+      },
     });
     const color = state.player.status === 'PARALYZED' ? 0xffff00 : 0x44aaff;
     this.playerRect.setFillStyle(color);
@@ -973,21 +1045,24 @@ export class Game extends Phaser.Scene {
 
   private syncEnemies(state: GameState): void {
     for (const enemy of state.enemies) {
-      const pos = tileToWorld(enemy.x, enemy.y);
+      const pos = toIso(enemy.x, enemy.y);
 
       if (!this.enemyRects.has(enemy.id)) {
-        // First appearance — create the game object
         const rect = this.add
-          .rectangle(pos.x, pos.y, TILE_SIZE - 12, TILE_SIZE - 12, 0xff4444)
-          .setDepth(2);
+          .rectangle(pos.x, pos.y, 22, 22, 0xff4444)
+          .setDepth(pos.y);
         this.enemyRects.set(enemy.id, rect);
       } else {
+        const rect = this.enemyRects.get(enemy.id)!;
         this.tweens.add({
-          targets: this.enemyRects.get(enemy.id),
+          targets: rect,
           x: pos.x,
           y: pos.y,
           duration: TWEEN_DURATION,
           ease: 'Linear',
+          onComplete: () => {
+            rect.setDepth(pos.y);
+          },
         });
       }
     }
@@ -1009,10 +1084,10 @@ export class Game extends Phaser.Scene {
     this.rayFadeMs -= delta;
     const alpha = Math.max(0, this.rayFadeMs / RAY_FADE_DURATION) * 0.9;
 
-    this.raysGraphics.lineStyle(3, 0xffff00, alpha);
+    this.raysGraphics.lineStyle(3, 0xff0000, alpha);
     for (const ray of this.cachedRays) {
-      const from = tileToWorld(ray.fromX, ray.fromY);
-      const to   = tileToWorld(ray.toX,   ray.toY);
+      const from = toIso(ray.fromX, ray.fromY);
+      const to   = toIso(ray.toX,   ray.toY);
       this.raysGraphics.lineBetween(from.x, from.y, to.x, to.y);
     }
   }
@@ -1020,44 +1095,71 @@ export class Game extends Phaser.Scene {
   // ─── Static visuals ─────────────────────────────────────────────────────────
 
   private drawGrid(): void {
-    // Dark background behind the grid
-    this.add
-      .rectangle(OFFSET_X + GRID_PX / 2, OFFSET_Y + GRID_PX / 2, GRID_PX, GRID_PX, 0x0d0d1a)
-      .setDepth(0);
+    const bg = this.add.graphics().setDepth(-2);
+    bg.fillStyle(0x0d0d1a, 1);
 
-    // Grid lines
-    this.add
-      .grid(
-        OFFSET_X + GRID_PX / 2,
-        OFFSET_Y + GRID_PX / 2,
-        GRID_PX,
-        GRID_PX,
-        TILE_SIZE,
-        TILE_SIZE,
-        0x000000, 0,      // cell fill: transparent
-        0x222244, 1,      // outline
-      )
-      .setDepth(1);
+    // Fill background diamond covering the entire grid
+    const top    = toIso(0, 0);
+    const right  = toIso(GRID_SIZE - 1, 0);
+    const bottom = toIso(GRID_SIZE - 1, GRID_SIZE - 1);
+    const left   = toIso(0, GRID_SIZE - 1);
+    bg.fillPoints([
+      new Phaser.Geom.Point(top.x,    top.y - HH),
+      new Phaser.Geom.Point(right.x + HW, right.y),
+      new Phaser.Geom.Point(bottom.x, bottom.y + HH),
+      new Phaser.Geom.Point(left.x - HW,  left.y),
+    ], true);
+
+    const g = this.add.graphics().setDepth(-1);
+    g.lineStyle(1, 0x222244, 1);
+
+    for (let gx = 0; gx < GRID_SIZE; gx++) {
+      for (let gy = 0; gy < GRID_SIZE; gy++) {
+        const c = toIso(gx, gy);
+        g.strokePoints([
+          new Phaser.Geom.Point(c.x,      c.y - HH),
+          new Phaser.Geom.Point(c.x + HW, c.y),
+          new Phaser.Geom.Point(c.x,      c.y + HH),
+          new Phaser.Geom.Point(c.x - HW, c.y),
+        ], true);
+      }
+    }
   }
 
   private drawCore(): void {
-    // Core occupies tiles (7,7)–(8,8): a 2×2 block at the centre of the grid
-    const cx = OFFSET_X + 7 * TILE_SIZE + TILE_SIZE;
-    const cy = OFFSET_Y + 7 * TILE_SIZE + TILE_SIZE;
-    const size = TILE_SIZE * 2 - 4;
+    // Core occupies tiles (7,7), (8,7), (7,8), (8,8)
+    // Draw as a single filled isometric quad spanning the 2×2 block
+    const topLeft  = toIso(7, 7);
+    const topRight = toIso(8, 7);
+    const botLeft  = toIso(7, 8);
+    const botRight = toIso(8, 8);
 
-    this.coreRect = this.add
-      .rectangle(cx, cy, size, size, 0x00cc66)
-      .setDepth(1);
+    // Outer diamond vertices of the 2×2 block
+    const topVertex    = { x: topLeft.x,        y: topLeft.y - HH };
+    const rightVertex  = { x: topRight.x + HW,  y: topRight.y };
+    const bottomVertex = { x: botRight.x,       y: botRight.y + HH };
+    const leftVertex   = { x: botLeft.x - HW,   y: botLeft.y };
 
-    // Pulsing glow border
-    this.add
-      .rectangle(cx, cy, size + 4, size + 4, 0x000000, 0)
-      .setStrokeStyle(2, 0x00ffaa)
-      .setDepth(1);
+    this.coreGfx = this.add.graphics().setDepth(botRight.y);
+
+    this.coreGfx.fillStyle(0x00cc66, 1);
+    this.coreGfx.fillPoints([
+      new Phaser.Geom.Point(topVertex.x,    topVertex.y),
+      new Phaser.Geom.Point(rightVertex.x,  rightVertex.y),
+      new Phaser.Geom.Point(bottomVertex.x, bottomVertex.y),
+      new Phaser.Geom.Point(leftVertex.x,   leftVertex.y),
+    ], true);
+
+    this.coreGfx.lineStyle(2, 0x00ffaa, 1);
+    this.coreGfx.strokePoints([
+      new Phaser.Geom.Point(topVertex.x,    topVertex.y),
+      new Phaser.Geom.Point(rightVertex.x,  rightVertex.y),
+      new Phaser.Geom.Point(bottomVertex.x, bottomVertex.y),
+      new Phaser.Geom.Point(leftVertex.x,   leftVertex.y),
+    ], true);
 
     this.tweens.add({
-      targets: this.coreRect,
+      targets: this.coreGfx,
       alpha: 0.6,
       yoyo: true,
       repeat: -1,
@@ -1083,6 +1185,10 @@ export class Game extends Phaser.Scene {
 // Layout
 export const GRID_SIZE = 15;
 export const TILE_SIZE = 48;
+
+// Isometric tile dimensions (2:1 diamond)
+export const ISO_TILE_W = 64;
+export const ISO_TILE_H = 32;
 
 // Directions
 export type Direction = 'up' | 'down' | 'left' | 'right';

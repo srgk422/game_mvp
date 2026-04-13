@@ -114,7 +114,7 @@ export class ServerEmulator {
   private applyMove(dir: Direction): void {
     if (this.state.player.status === 'PARALYZED') return;
     const { x, y } = this.state.player;
-    const next = this.step(x, y, dir);
+    const next = this.playerStep(x, y, dir);
     if (!this.isBlocked(next.x, next.y)) {
       this.state.player.x = next.x;
       this.state.player.y = next.y;
@@ -212,6 +212,15 @@ export class ServerEmulator {
     return CORE_TILES.some(t => Math.abs(t.x - x) + Math.abs(t.y - y) === 1);
   }
 
+  /** Screen-aligned diagonal step for the player (iso projection). */
+  private playerStep(x: number, y: number, dir: Direction): { x: number; y: number } {
+    if (dir === 'up')    return { x: x - 1, y: y - 1 };
+    if (dir === 'down')  return { x: x + 1, y: y + 1 };
+    if (dir === 'left')  return { x: x - 1, y: y + 1 };
+    return { x: x + 1, y: y - 1 }; // 'right'
+  }
+
+  /** Cardinal step used for enemy AI movement. */
   private step(x: number, y: number, dir: Direction): { x: number; y: number } {
     if (dir === 'up')    return { x, y: y - 1 };
     if (dir === 'down')  return { x, y: y + 1 };

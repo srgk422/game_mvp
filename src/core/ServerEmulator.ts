@@ -1,39 +1,11 @@
 import { EventBus, Events } from './EventBus';
+import { GRID_SIZE, Direction, PlayerInput, GameState } from '../types/game';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export type Direction = 'up' | 'down' | 'left' | 'right';
-
-export type PlayerInput =
-  | { type: 'move'; dir: Direction }
-  | { type: 'action' };
-
-export interface Ray {
-  fromX: number;
-  fromY: number;
-  toX: number;
-  toY: number;
-}
-
-export interface GameState {
-  room: {
-    status: 'ACTIVE' | 'WON' | 'LOST';
-    timer: number;
-    coreHP: number;
-  };
-  player: {
-    x: number;
-    y: number;
-    status: 'NORMAL' | 'PARALYZED';
-    pTimer: number;
-  };
-  enemies: Array<{ id: string; x: number; y: number }>;
-  rays: Ray[];
-}
+export type { Direction, PlayerInput, GameState };
+export type { Ray } from '../types/game';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const GRID_SIZE = 15;
 const TICK_MS = 100;
 const TIMER_DURATION = 120;
 const CORE_HP_MAX = 100;

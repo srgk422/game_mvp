@@ -4,7 +4,7 @@
 
 ---
 
-## [0.1.0] — 2026-04-13
+## [0.1.0] — 2026-04-13 (`main`)
 
 ### Инициализация проекта
 
@@ -34,7 +34,7 @@
 
 ---
 
-## [0.2.0] — 2026-04-13
+## [0.2.0] — 2026-04-13 (`main`)
 
 ### MVP Stage 5 "The Core" — эмулятор сервера и базовая отрисовка
 
@@ -68,3 +68,31 @@
 - Core: зелёный Rectangle 2×2 тайла с пульсирующим alpha-твином
 - Лучи паралича: `Graphics.lineBetween`, fade-out за 600 мс в `update()`
 - Ввод: WASD + стрелки (движение, throttle 100 мс) + Space (действие, `JustDown`)
+
+---
+
+## [0.3.0] — 2026-04-13 (`feature/first-heartbeat`)
+
+### "Первое сердцебиение" — типы, HUD, интеграция React ↔ Server
+
+**Добавлены файлы:**
+
+| Файл | Назначение |
+|---|---|
+| `src/types/game.ts` | Общие типы (`GameState`, `PlayerInput`, `Direction`, `Ray`) и константы (`GRID_SIZE`, `TILE_SIZE`), используемые сервером и клиентом |
+| `src/components/HUD.tsx` | React HUD поверх канваса: таймер `MM:SS`, прогресс-бар HP ядра, оверлеи VICTORY / LOST |
+
+**Изменены файлы:**
+
+| Файл | Что изменилось |
+|---|---|
+| `src/core/ServerEmulator.ts` | Типы вынесены в `types/game.ts`, ре-экспорт для обратной совместимости |
+| `src/scenes/Game.ts` | Импорт типов и констант из `types/game.ts` вместо дублирования |
+| `src/App.tsx` | Подписка на `SERVER_UPDATE` через `useEffect`/`useState`, проброс `GameState` в `<HUD>` |
+
+**Архитектурные решения:**
+- Типы вынесены в `src/types/game.ts` — единый источник для сервера, Phaser-сцены и React UI
+- HUD: `position: absolute` + `pointer-events: none` — отображается поверх канваса, не перехватывает клики
+- Таймер мигает красным при `<= 30` секунд, HP-бар меняет цвет при `<= 30%`
+- Оверлей конца игры: полупрозрачный `rgba(0,0,0,0.7)` фон + крупный текст с `text-shadow`
+- Поток данных: `ServerEmulator` → `EventBus(SERVER_UPDATE)` → `App.tsx(useState)` → `HUD(props)`

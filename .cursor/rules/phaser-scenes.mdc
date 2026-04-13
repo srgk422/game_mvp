@@ -1,0 +1,30 @@
+---
+description: Соглашения для Phaser-сцен и игровой логики
+globs: src/scenes/**/*.ts
+alwaysApply: false
+---
+
+# Phaser Scenes
+
+## Структура сцены
+```typescript
+import Phaser from 'phaser';
+
+export class SceneName extends Phaser.Scene {
+  constructor() {
+    super({ key: 'SceneName' });
+  }
+
+  preload(): void { /* загрузка ассетов */ }
+  create(): void  { /* инициализация объектов */ }
+  update(): void  { /* игровой цикл */ }
+}
+```
+
+## Правила
+- Каждая сцена — отдельный файл в `src/scenes/`
+- Именованный экспорт (`export class`, не `export default`)
+- Ключ сцены (`key`) совпадает с именем класса
+- Переходы только через `this.scene.start('Key')` или `this.scene.launch('Key')`
+- Игровая логика — в сценах; данные состояния — в `GameState` (ServerEmulator)
+- Для плавного перемещения объектов использовать `this.tweens.add`, не телепортировать напрямую

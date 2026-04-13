@@ -1,0 +1,49 @@
+---
+description: Общий контекст проекта — стек, архитектура, соглашения
+alwaysApply: true
+---
+
+# Контекст проекта
+
+## Стек
+- **Vite 5** — сборщик, dev-сервер на порту 8080
+- **React 18** — UI-оболочка (меню, HUD, оверлеи)
+- **TypeScript 5** — strict mode, moduleResolution bundler
+- **Phaser 3.88** — игровой движок (WebGL/Canvas)
+
+## Архитектура React ↔ Phaser
+- React рендерит `App.tsx` → `GameCanvas.tsx`
+- `GameCanvas.tsx` монтирует `Phaser.Game` через `useRef`/`useEffect` и уничтожает при размонтировании
+- Phaser-сцены (`src/scenes/`) — чистый игровой код, без React
+- React-слой — UI поверх канваса (прогресс-бары, оверлеи)
+
+## Архитектура игровой логики (Authoritative Mock Server)
+- `ServerEmulator` — единственный источник истины; хранит `GameState`, тикает 10 Гц
+- Фронтенд — «глупый» клиент: только отправляет намерения и отрисовывает полученное состояние
+- Связь через `EventBus` (singleton `Phaser.Events.EventEmitter`):
+  - `SERVER_UPDATE` — сервер → клиент (каждые 100 мс, полный `GameState`)
+  - `PLAYER_INPUT` — клиент → сервер (`{ type: 'move', dir }` или `{ type: 'action' }`)
+
+## Ключевые файлы
+| Файл | Роль |
+|---|---|
+| `src/main.tsx` | Точка входа React |
+| `src/App.tsx` | Корневой компонент |
+| `src/components/GameCanvas.tsx` | Монтирование Phaser |
+| `src/core/EventBus.ts` | Singleton шина событий + константы `Events` |
+| `src/core/ServerEmulator.ts` | Mock-сервер: `GameState`, тики, LOS, коллизии |
+| `src/scenes/Boot.ts` | Загрузка ассетов → переход в Game |
+| `src/scenes/Game.ts` | Основная игровая сцена: отрисовка, tweens, ввод |
+| `MECHANICS_CONTEXT.md` | Полная спецификация игровых механик |
+| `CHANGELOG.md` | Лог всех изменений |
+| `PROJECT_SNAPSHOT.md` | Авто-генерируемый снапшот проекта (`npm run snapshot`) |
+| `scripts/snapshot.mjs` | Скрипт генерации снапшота |
+
+## Соглашения
+- После каждого изменения обновлять `CHANGELOG.md` — добавлять блок с датой, затронутыми файлами и описанием решения
+- После каждой доработки оценивать внесённые изменения: если появились новые файлы, архитектурные решения, паттерны или соглашения — добавлять их в этот файл (`project-context.mdc`)
+- Phaser-сцены — классы, именованный экспорт (`export class`)
+- React-компоненты — функциональные, `export default`
+- Разрешение канваса: 1280×720, `Phaser.Scale.FIT` + `CENTER_BOTH`
+- Сетка: 15×15 тайлов по 48 px; центрирована: `OFFSET_X = 280`, `OFFSET_Y = 0`
+- Игровые объекты двигаются через `this.tweens.add` (80 мс), не телепортируются

@@ -1,11 +1,7 @@
 import Phaser from 'phaser';
 import { EventBus, Events } from '../core/EventBus';
-import { ServerEmulator, GameState, PlayerInput, Ray } from '../core/ServerEmulator';
-
-// ─── Layout constants (must match ServerEmulator) ─────────────────────────────
-
-const GRID_SIZE = 15;
-const TILE_SIZE = 48;
+import { ServerEmulator } from '../core/ServerEmulator';
+import { GRID_SIZE, TILE_SIZE, GameState, PlayerInput, Ray } from '../types/game';
 const GRID_PX = GRID_SIZE * TILE_SIZE; // 720 px
 const OFFSET_X = (1280 - GRID_PX) / 2; // 280 px — centers grid on 1280-wide canvas
 const OFFSET_Y = (720 - GRID_PX) / 2;  // 0 px  — grid fills full height

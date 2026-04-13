@@ -38,6 +38,7 @@ export class Game extends Phaser.Scene {
   private sKey!: Phaser.Input.Keyboard.Key;
   private dKey!: Phaser.Input.Keyboard.Key;
   private spaceKey!: Phaser.Input.Keyboard.Key;
+  private eKey!: Phaser.Input.Keyboard.Key;
   private lastMoveTime = 0;
 
   private cachedRays: Ray[] = [];
@@ -82,10 +83,11 @@ export class Game extends Phaser.Scene {
     this.sKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.S);
     this.dKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.D);
     this.spaceKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.eKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.E);
   }
 
   private handleInput(time: number): void {
-    if (Phaser.Input.Keyboard.JustDown(this.spaceKey)) {
+    if (Phaser.Input.Keyboard.JustDown(this.spaceKey) || Phaser.Input.Keyboard.JustDown(this.eKey)) {
       EventBus.emit(Events.PLAYER_INPUT, { type: 'action' } satisfies PlayerInput);
     }
 
@@ -118,15 +120,13 @@ export class Game extends Phaser.Scene {
 
   private syncPlayer(state: GameState): void {
     const pos = toIso(state.player.x, state.player.y);
+    this.playerRect.setDepth(pos.y);
     this.tweens.add({
       targets: this.playerRect,
       x: pos.x,
       y: pos.y,
       duration: TWEEN_DURATION,
       ease: 'Linear',
-      onComplete: () => {
-        this.playerRect.setDepth(pos.y);
-      },
     });
     const color = state.player.status === 'PARALYZED' ? 0xffff00 : 0x44aaff;
     this.playerRect.setFillStyle(color);
@@ -143,15 +143,13 @@ export class Game extends Phaser.Scene {
         this.enemyRects.set(enemy.id, rect);
       } else {
         const rect = this.enemyRects.get(enemy.id)!;
+        rect.setDepth(pos.y);
         this.tweens.add({
           targets: rect,
           x: pos.x,
           y: pos.y,
           duration: TWEEN_DURATION,
           ease: 'Linear',
-          onComplete: () => {
-            rect.setDepth(pos.y);
-          },
         });
       }
     }

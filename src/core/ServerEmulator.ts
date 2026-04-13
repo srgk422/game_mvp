@@ -9,7 +9,7 @@ export type { Ray } from '../types/game';
 const TICK_MS = 100;
 const TIMER_DURATION = 120;
 const CORE_HP_MAX = 100;
-const CORE_DAMAGE = 10;
+const CORE_DAMAGE = 5;
 const PARALYSIS_DURATION = 5;
 const LOS_RANGE = 5;
 const ENEMY_MOVE_NORMAL = 5; // ticks between moves (~500 ms)

@@ -1,6 +1,6 @@
 # Project Snapshot
 
-_Generated: 2026-04-13 22:11_
+_Generated: 2026-04-13 22:32_
 
 ## File tree
 
@@ -179,6 +179,22 @@ _Generated: 2026-04-13 22:11_
 - Лучи паралича изменены с жёлтых (`0xffff00`) на красные (`0xff0000`)
 - Управление Screen-Aligned: WASD двигает игрока по диагоналям логической сетки, визуально это выглядит как движение по экранным осям
 - Доступность Core: при диагональном движении игрок может достичь прилегающих тайлов (9,7), (8,6), (6,8), (7,9) для взаимодействия
+
+---
+
+## [0.4.1] — 2026-04-14 (`feature/isometric`)
+
+### Механика саботажа, E-key, fix depth sorting
+
+**Изменены файлы:**
+
+| Файл | Что изменилось |
+|---|---|
+| `src/core/ServerEmulator.ts` | `CORE_DAMAGE` уменьшен с 10 до 5 (5% за действие) |
+| `src/scenes/Game.ts` | Добавлена клавиша E как альтернатива Space для действия; depth sorting теперь обновляется немедленно при получении `SERVER_UPDATE`, а не в `onComplete` tween'а |
+
+**Примечания:**
+- LOS-блокировка Ядром, условие победы (`coreHP <= 0 → WON`), и шкала HP в HUD были реализованы ранее — подтверждена корректная работа
 ```
 
 ### `index.html`
@@ -316,7 +332,79 @@ interface GameState {
 ### `README.md`
 
 ```md
-# game_mvp
+# The Core — MVP
+
+Мультиплеерный хоррор с изометрической проекцией. Игроки уничтожают био-механическое Ядро в центре зала, избегая лучей паралича от Сталкеров.
+
+## Стек
+
+- **Vite 5** — сборка и dev-сервер
+- **React 18** — UI-оболочка (HUD, оверлеи)
+- **TypeScript 5** — strict mode
+- **Phaser 3.88** — игровой движок (WebGL/Canvas)
+
+## Установка
+
+```bash
+npm install
+```
+
+## Запуск (dev)
+
+```bash
+npm run dev
+```
+
+Dev-сервер стартует на `http://localhost:8080/`.
+
+## Сборка (production)
+
+```bash
+npm run build
+```
+
+Результат — папка `dist/`. Для локального просмотра собранной версии:
+
+```bash
+npm run preview
+```
+
+## Управление
+
+| Клавиша | Действие |
+|---------|----------|
+| W / Arrow Up | Движение вверх (экранное) |
+| S / Arrow Down | Движение вниз (экранное) |
+| A / Arrow Left | Движение влево (экранное) |
+| D / Arrow Right | Движение вправо (экранное) |
+| Space | Взаимодействие (урон Ядру, если рядом) |
+
+## Структура проекта
+
+```
+src/
+├── components/
+│   ├── GameCanvas.tsx    # Монтирование Phaser в React
+│   └── HUD.tsx           # Таймер, HP Ядра, оверлеи
+├── core/
+│   ├── EventBus.ts       # Singleton шина событий
+│   └── ServerEmulator.ts # Авторитативный mock-сервер
+├── scenes/
+│   ├── Boot.ts           # Загрузка ассетов
+│   └── Game.ts           # Основная игровая сцена (изометрия)
+├── types/
+│   └── game.ts           # Общие типы и константы
+├── App.tsx               # Корневой React-компонент
+└── main.tsx              # Точка входа
+```
+
+## Утилиты
+
+```bash
+npm run snapshot
+```
+
+Генерирует `PROJECT_SNAPSHOT.md` — полный снимок дерева файлов и исходного кода проекта.
 ```
 
 ### `scripts/snapshot.mjs`
@@ -634,7 +722,7 @@ export type { Ray } from '../types/game';
 const TICK_MS = 100;
 const TIMER_DURATION = 120;
 const CORE_HP_MAX = 100;
-const CORE_DAMAGE = 10;
+const CORE_DAMAGE = 5;
 const PARALYSIS_DURATION = 5;
 const LOS_RANGE = 5;
 const ENEMY_MOVE_NORMAL = 5; // ticks between moves (~500 ms)
@@ -949,6 +1037,7 @@ export class Game extends Phaser.Scene {
   private sKey!: Phaser.Input.Keyboard.Key;
   private dKey!: Phaser.Input.Keyboard.Key;
   private spaceKey!: Phaser.Input.Keyboard.Key;
+  private eKey!: Phaser.Input.Keyboard.Key;
   private lastMoveTime = 0;
 
   private cachedRays: Ray[] = [];
@@ -993,10 +1082,11 @@ export class Game extends Phaser.Scene {
     this.sKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.S);
     this.dKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.D);
     this.spaceKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.eKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.E);
   }
 
   private handleInput(time: number): void {
-    if (Phaser.Input.Keyboard.JustDown(this.spaceKey)) {
+    if (Phaser.Input.Keyboard.JustDown(this.spaceKey) || Phaser.Input.Keyboard.JustDown(this.eKey)) {
       EventBus.emit(Events.PLAYER_INPUT, { type: 'action' } satisfies PlayerInput);
     }
 
@@ -1029,15 +1119,13 @@ export class Game extends Phaser.Scene {
 
   private syncPlayer(state: GameState): void {
     const pos = toIso(state.player.x, state.player.y);
+    this.playerRect.setDepth(pos.y);
     this.tweens.add({
       targets: this.playerRect,
       x: pos.x,
       y: pos.y,
       duration: TWEEN_DURATION,
       ease: 'Linear',
-      onComplete: () => {
-        this.playerRect.setDepth(pos.y);
-      },
     });
     const color = state.player.status === 'PARALYZED' ? 0xffff00 : 0x44aaff;
     this.playerRect.setFillStyle(color);
@@ -1054,15 +1142,13 @@ export class Game extends Phaser.Scene {
         this.enemyRects.set(enemy.id, rect);
       } else {
         const rect = this.enemyRects.get(enemy.id)!;
+        rect.setDepth(pos.y);
         this.tweens.add({
           targets: rect,
           x: pos.x,
           y: pos.y,
           duration: TWEEN_DURATION,
           ease: 'Linear',
-          onComplete: () => {
-            rect.setDepth(pos.y);
-          },
         });
       }
     }

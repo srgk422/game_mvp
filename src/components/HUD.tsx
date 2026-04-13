@@ -14,6 +14,7 @@ export default function HUD({ state }: HUDProps) {
   if (!state) return null;
 
   const { status, timer, coreHP } = state.room;
+  const isParalyzed = state.player.status === 'PARALYZED';
 
   return (
     <div style={{
@@ -23,6 +24,24 @@ export default function HUD({ state }: HUDProps) {
       fontFamily: 'monospace',
       color: '#fff',
     }}>
+      {/* Paralysis warning */}
+      {isParalyzed && (
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -80%)',
+          fontSize: '28px',
+          fontWeight: 'bold',
+          color: '#ffff00',
+          textShadow: '0 0 20px #ffff00, 0 0 40px rgba(255,255,0,0.4)',
+          animation: 'pulse 0.6s ease-in-out infinite alternate',
+          whiteSpace: 'nowrap',
+        }}>
+          SYSTEM FAILURE: PARALYZED
+        </div>
+      )}
+
       {/* Top bar: timer + core HP */}
       <div style={{
         display: 'flex',

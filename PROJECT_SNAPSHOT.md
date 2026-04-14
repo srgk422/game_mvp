@@ -1,6 +1,6 @@
 # Project Snapshot
 
-_Generated: 2026-04-13 22:11_
+_Generated: 2026-04-14 00:16_
 
 ## File tree
 
@@ -179,6 +179,38 @@ _Generated: 2026-04-13 22:11_
 - Лучи паралича изменены с жёлтых (`0xffff00`) на красные (`0xff0000`)
 - Управление Screen-Aligned: WASD двигает игрока по диагоналям логической сетки, визуально это выглядит как движение по экранным осям
 - Доступность Core: при диагональном движении игрок может достичь прилегающих тайлов (9,7), (8,6), (6,8), (7,9) для взаимодействия
+
+---
+
+## [0.5.0] — 2026-04-14 (`main`)
+
+### Активный ИИ преследования + система защиты от stun-lock
+
+Реализована полная модель поведения Сталкеров (FSM) и три уровня защиты игрока от бесконечного паралича.
+
+**Изменены файлы:**
+
+| Файл | Что изменилось |
+|---|---|
+| `src/types/game.ts` | Добавлены типы `StalkerState`, `EnemyData`; расширены `player` (`isInvulnerable`, `iTimer`) и `enemies` (`.state`); добавлено поле `coreHit` в `GameState` |
+| `src/core/ServerEmulator.ts` | FSM сталкеров (PATROL→CHASE→ATTACK), Knockback на 2 клетки, I-Frames после паралича, Anti-Dogpiling, chase pathfinding |
+| `src/scenes/Game.ts` | Анимация knockback (быстрый tween), мигание игрока при неуязвимости, VFX удара по ядру (белая вспышка + тряска), цветовая индикация состояний сталкеров, клавиша E для атаки |
+
+**Stalker FSM:**
+- **PATROL** (серв. цвет: красный): случайное движение, интервал 500мс (300мс при HP<30%)
+- **CHASE** (серв. цвет: оранжевый): сближение с игроком раз в 300мс, активируется при Manhattan distance ≤ 5
+- **ATTACK** (серв. цвет: ярко-красный): луч паралича при нахождении на одной линии (X или Y) и дистанции ≤ 2 с LOS; после атаки сталкер сразу возвращается в PATROL
+
+**Защита от stun-lock (3 уровня):**
+1. **Knockback**: при попадании луча игрок отбрасывается на 2 клетки от сталкера (с проверкой коллизий ядра и границ); в Phaser — быстрый tween с `Power2` easing (120мс)
+2. **I-Frames**: после окончания паралича (5 сек) игрок получает `isInvulnerable` на 2 секунды; визуально — мигание спрайта (150мс цикл)
+3. **Anti-Dogpiling**: если игрок `PARALYZED` или `isInvulnerable`, все сталкеры переходят в `PATROL` и не преследуют
+
+**Визуализация и VFX:**
+- Лучи паралича: красные линии через `toIso()` с fade-out
+- Удар по ядру (Space/E): белая вспышка поверх ядра с fade-out (200мс) + тряска Graphics (40мс × 3)
+- Depth sorting: `depth = screenY` для всех объектов (игрок, враги, ядро)
+- Ядро блокирует LOS для сталкеров (уже было, сохранено)
 ```
 
 ### `index.html`
@@ -624,9 +656,16 @@ export const Events = {
 
 ```ts
 import { EventBus, Events } from './EventBus';
-import { GRID_SIZE, Direction, PlayerInput, GameState } from '../types/game';
+import {
+  GRID_SIZE,
+  Direction,
+  PlayerInput,
+  GameState,
+  EnemyData,
+  StalkerState,
+} from '../types/game';
 
-export type { Direction, PlayerInput, GameState };
+export type { Direction, PlayerInput, GameState, EnemyData, StalkerState };
 export type { Ray } from '../types/game';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -637,8 +676,15 @@ const CORE_HP_MAX = 100;
 const CORE_DAMAGE = 10;
 const PARALYSIS_DURATION = 5;
 const LOS_RANGE = 5;
-const ENEMY_MOVE_NORMAL = 5; // ticks between moves (~500 ms)
-const ENEMY_MOVE_FAST = 3;   // ticks between moves at <30% core HP (~300 ms)
+const ENEMY_MOVE_NORMAL = 5;  // ticks between moves (~500 ms) — PATROL
+const ENEMY_MOVE_FAST = 3;    // ticks between moves at <30% core HP (~300 ms)
+const CHASE_INTERVAL = 3;     // ticks between moves in CHASE mode (~300 ms)
+
+const CHASE_RANGE = 5;
+const ATTACK_RANGE = 2;
+
+const KNOCKBACK_DIST = 2;
+const INVULN_DURATION = 2;    // seconds after paralysis ends
 
 const CORE_TILES = [
   { x: 7, y: 7 },
@@ -648,11 +694,11 @@ const CORE_TILES = [
 ];
 
 const ENEMY_STARTS: Array<{ id: string; x: number; y: number }> = [
-  { id: 'e0', x: 13, y: 1  },
-  { id: 'e1', x: 1,  y: 13 },
+  { id: 'e0', x: 13, y: 1 },
+  { id: 'e1', x: 1, y: 13 },
   { id: 'e2', x: 13, y: 13 },
-  { id: 'e3', x: 6,  y: 13 },
-  { id: 'e4', x: 13, y: 6  },
+  { id: 'e3', x: 6, y: 13 },
+  { id: 'e4', x: 13, y: 6 },
 ];
 
 // ─── ServerEmulator ───────────────────────────────────────────────────────────
@@ -662,7 +708,6 @@ export class ServerEmulator {
   private tickHandle: ReturnType<typeof setInterval> | null = null;
   private pendingDir: Direction | null = null;
   private pendingAction = false;
-  // Stagger initial counters so enemies don't all move on the same tick
   private enemyCounters: number[] = ENEMY_STARTS.map((_, i) => i);
 
   constructor() {
@@ -671,7 +716,6 @@ export class ServerEmulator {
 
   start(): void {
     EventBus.on(Events.PLAYER_INPUT, this.onPlayerInput, this);
-    // Broadcast initial state immediately so the scene can position entities
     EventBus.emit(Events.SERVER_UPDATE, this.snapshot());
     this.tickHandle = setInterval(() => this.tick(), TICK_MS);
   }
@@ -696,6 +740,8 @@ export class ServerEmulator {
   private tick(): void {
     if (this.state.room.status !== 'ACTIVE') return;
 
+    this.state.coreHit = false;
+
     // 1. Player input
     if (this.pendingDir !== null) {
       this.applyMove(this.pendingDir);
@@ -707,27 +753,44 @@ export class ServerEmulator {
     }
 
     // 2. Timers
-    this.state.room.timer = Math.max(0, +(this.state.room.timer - TICK_MS / 1000).toFixed(2));
+    this.state.room.timer = Math.max(
+      0,
+      +(this.state.room.timer - TICK_MS / 1000).toFixed(2),
+    );
 
     if (this.state.player.status === 'PARALYZED') {
       this.state.player.pTimer -= TICK_MS / 1000;
       if (this.state.player.pTimer <= 0) {
         this.state.player.status = 'NORMAL';
         this.state.player.pTimer = 0;
+        this.state.player.isInvulnerable = true;
+        this.state.player.iTimer = INVULN_DURATION;
       }
     }
 
-    // 3. Enemy movement
+    if (this.state.player.isInvulnerable) {
+      this.state.player.iTimer -= TICK_MS / 1000;
+      if (this.state.player.iTimer <= 0) {
+        this.state.player.isInvulnerable = false;
+        this.state.player.iTimer = 0;
+      }
+    }
+
+    // 3. Enemy FSM + movement
+    this.updateEnemyFSM();
     this.moveEnemies();
 
-    // 4. LOS / paralysis check (only when player is free)
+    // 4. LOS / paralysis check
     this.state.rays = [];
-    if (this.state.player.status === 'NORMAL') {
+    if (
+      this.state.player.status === 'NORMAL' &&
+      !this.state.player.isInvulnerable
+    ) {
       this.checkParalysis();
     }
 
     // 5. Win / loss conditions
-    if (this.state.room.coreHP <= 0)   this.state.room.status = 'WON';
+    if (this.state.room.coreHP <= 0) this.state.room.status = 'WON';
     else if (this.state.room.timer <= 0) this.state.room.status = 'LOST';
 
     // 6. Broadcast
@@ -750,57 +813,172 @@ export class ServerEmulator {
     if (this.state.player.status === 'PARALYZED') return;
     const { x, y } = this.state.player;
     if (this.isAdjacentToCore(x, y)) {
-      this.state.room.coreHP = Math.max(0, this.state.room.coreHP - CORE_DAMAGE);
+      this.state.room.coreHP = Math.max(
+        0,
+        this.state.room.coreHP - CORE_DAMAGE,
+      );
+      this.state.coreHit = true;
     }
-    // Ally revive: not applicable in single-player MVP
+  }
+
+  // ─── Enemy FSM ──────────────────────────────────────────────────────────────
+
+  private playerIsProtected(): boolean {
+    return (
+      this.state.player.status === 'PARALYZED' ||
+      this.state.player.isInvulnerable
+    );
+  }
+
+  private updateEnemyFSM(): void {
+    const { x: px, y: py } = this.state.player;
+    const isProtected = this.playerIsProtected();
+
+    for (const e of this.state.enemies) {
+      if (isProtected) {
+        e.state = 'PATROL';
+        continue;
+      }
+
+      const dist = Math.abs(e.x - px) + Math.abs(e.y - py);
+
+      const sameRow = e.y === py;
+      const sameCol = e.x === px;
+      const dx = Math.abs(e.x - px);
+      const dy = Math.abs(e.y - py);
+      const inAttackRange =
+        (sameRow && dx > 0 && dx <= ATTACK_RANGE) ||
+        (sameCol && dy > 0 && dy <= ATTACK_RANGE);
+
+      if (inAttackRange && this.hasLOS(e.x, e.y, px, py)) {
+        e.state = 'ATTACK';
+      } else if (dist <= CHASE_RANGE) {
+        e.state = 'CHASE';
+      } else {
+        e.state = 'PATROL';
+      }
+    }
   }
 
   private moveEnemies(): void {
-    const interval =
+    const patrolInterval =
       this.state.room.coreHP < 30 ? ENEMY_MOVE_FAST : ENEMY_MOVE_NORMAL;
     const dirs: Direction[] = ['up', 'down', 'left', 'right'];
 
     for (let i = 0; i < this.state.enemies.length; i++) {
+      const e = this.state.enemies[i];
+
+      if (e.state === 'ATTACK') continue;
+
+      const interval = e.state === 'CHASE' ? CHASE_INTERVAL : patrolInterval;
+
       this.enemyCounters[i]++;
       if (this.enemyCounters[i] < interval) continue;
       this.enemyCounters[i] = 0;
 
-      const e = this.state.enemies[i];
-      // Fisher-Yates shuffle for random direction priority
-      const shuffled = [...dirs];
-      for (let j = shuffled.length - 1; j > 0; j--) {
-        const k = Math.floor(Math.random() * (j + 1));
-        [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
-      }
-
-      for (const dir of shuffled) {
-        const next = this.step(e.x, e.y, dir);
-        if (!this.isBlocked(next.x, next.y)) {
-          e.x = next.x;
-          e.y = next.y;
-          break;
+      if (e.state === 'CHASE') {
+        this.moveTowardsPlayer(e);
+      } else {
+        const shuffled = [...dirs];
+        for (let j = shuffled.length - 1; j > 0; j--) {
+          const k = Math.floor(Math.random() * (j + 1));
+          [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
+        }
+        for (const dir of shuffled) {
+          const next = this.step(e.x, e.y, dir);
+          if (!this.isBlocked(next.x, next.y)) {
+            e.x = next.x;
+            e.y = next.y;
+            break;
+          }
         }
       }
     }
   }
 
+  private moveTowardsPlayer(e: EnemyData): void {
+    const { x: px, y: py } = this.state.player;
+    const dx = px - e.x;
+    const dy = py - e.y;
+
+    const candidates: Array<{ x: number; y: number }> = [];
+
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      candidates.push({ x: e.x + Math.sign(dx), y: e.y });
+      if (dy !== 0) candidates.push({ x: e.x, y: e.y + Math.sign(dy) });
+    } else {
+      candidates.push({ x: e.x, y: e.y + Math.sign(dy) });
+      if (dx !== 0) candidates.push({ x: e.x + Math.sign(dx), y: e.y });
+    }
+
+    for (const c of candidates) {
+      if (!this.isBlocked(c.x, c.y)) {
+        e.x = c.x;
+        e.y = c.y;
+        return;
+      }
+    }
+  }
+
+  // ─── Paralysis + Knockback ──────────────────────────────────────────────────
+
   private checkParalysis(): void {
     const { x: px, y: py } = this.state.player;
 
     for (const enemy of this.state.enemies) {
+      if (enemy.state !== 'ATTACK') continue;
+
       const dx = Math.abs(enemy.x - px);
       const dy = Math.abs(enemy.y - py);
 
-      const sameRow = enemy.y === py && dx > 0 && dx <= LOS_RANGE;
-      const sameCol = enemy.x === px && dy > 0 && dy <= LOS_RANGE;
+      const sameRow = enemy.y === py && dx > 0 && dx <= ATTACK_RANGE;
+      const sameCol = enemy.x === px && dy > 0 && dy <= ATTACK_RANGE;
 
       if ((sameRow || sameCol) && this.hasLOS(enemy.x, enemy.y, px, py)) {
         this.state.player.status = 'PARALYZED';
         this.state.player.pTimer = PARALYSIS_DURATION;
-        this.state.rays.push({ fromX: enemy.x, fromY: enemy.y, toX: px, toY: py });
-        return; // one hit is enough per tick
+        this.state.rays.push({
+          fromX: enemy.x,
+          fromY: enemy.y,
+          toX: px,
+          toY: py,
+        });
+
+        this.applyKnockback(enemy.x, enemy.y);
+
+        enemy.state = 'PATROL';
+
+        return;
       }
     }
+  }
+
+  private applyKnockback(ex: number, ey: number): void {
+    const p = this.state.player;
+    const dx = p.x - ex;
+    const dy = p.y - ey;
+
+    let dirX = 0;
+    let dirY = 0;
+
+    if (dx !== 0) dirX = Math.sign(dx);
+    if (dy !== 0) dirY = Math.sign(dy);
+
+    if (dirX === 0 && dirY === 0) dirX = 1;
+
+    let finalX = p.x;
+    let finalY = p.y;
+
+    for (let step = 1; step <= KNOCKBACK_DIST; step++) {
+      const nx = p.x + dirX * step;
+      const ny = p.y + dirY * step;
+      if (this.isBlocked(nx, ny)) break;
+      finalX = nx;
+      finalY = ny;
+    }
+
+    p.x = finalX;
+    p.y = finalY;
   }
 
   // ─── Private: spatial helpers ───────────────────────────────────────────────
@@ -830,32 +1008,39 @@ export class ServerEmulator {
   }
 
   private isCoreTile(x: number, y: number): boolean {
-    return CORE_TILES.some(t => t.x === x && t.y === y);
+    return CORE_TILES.some((t) => t.x === x && t.y === y);
   }
 
   private isAdjacentToCore(x: number, y: number): boolean {
-    return CORE_TILES.some(t => Math.abs(t.x - x) + Math.abs(t.y - y) === 1);
+    return CORE_TILES.some((t) => Math.abs(t.x - x) + Math.abs(t.y - y) === 1);
   }
 
   /** Screen-aligned diagonal step for the player (iso projection). */
-  private playerStep(x: number, y: number, dir: Direction): { x: number; y: number } {
-    if (dir === 'up')    return { x: x - 1, y: y - 1 };
-    if (dir === 'down')  return { x: x + 1, y: y + 1 };
-    if (dir === 'left')  return { x: x - 1, y: y + 1 };
+  private playerStep(
+    x: number,
+    y: number,
+    dir: Direction,
+  ): { x: number; y: number } {
+    if (dir === 'up') return { x: x - 1, y: y - 1 };
+    if (dir === 'down') return { x: x + 1, y: y + 1 };
+    if (dir === 'left') return { x: x - 1, y: y + 1 };
     return { x: x + 1, y: y - 1 }; // 'right'
   }
 
   /** Cardinal step used for enemy AI movement. */
-  private step(x: number, y: number, dir: Direction): { x: number; y: number } {
-    if (dir === 'up')    return { x, y: y - 1 };
-    if (dir === 'down')  return { x, y: y + 1 };
-    if (dir === 'left')  return { x: x - 1, y };
+  private step(
+    x: number,
+    y: number,
+    dir: Direction,
+  ): { x: number; y: number } {
+    if (dir === 'up') return { x, y: y - 1 };
+    if (dir === 'down') return { x, y: y + 1 };
+    if (dir === 'left') return { x: x - 1, y };
     return { x: x + 1, y }; // 'right'
   }
 
   // ─── Private: state ─────────────────────────────────────────────────────────
 
-  /** Deep-copy snapshot sent to the client on every tick. */
   private snapshot(): GameState {
     return JSON.parse(JSON.stringify(this.state)) as GameState;
   }
@@ -863,9 +1048,20 @@ export class ServerEmulator {
   private createInitialState(): GameState {
     return {
       room: { status: 'ACTIVE', timer: TIMER_DURATION, coreHP: CORE_HP_MAX },
-      player: { x: 1, y: 7, status: 'NORMAL', pTimer: 0 },
-      enemies: ENEMY_STARTS.map(e => ({ ...e })),
+      player: {
+        x: 1,
+        y: 7,
+        status: 'NORMAL',
+        pTimer: 0,
+        isInvulnerable: false,
+        iTimer: 0,
+      },
+      enemies: ENEMY_STARTS.map((e) => ({
+        ...e,
+        state: 'PATROL' as StalkerState,
+      })),
       rays: [],
+      coreHit: false,
     };
   }
 }
@@ -912,17 +1108,24 @@ export class Boot extends Phaser.Scene {
 import Phaser from 'phaser';
 import { EventBus, Events } from '../core/EventBus';
 import { ServerEmulator } from '../core/ServerEmulator';
-import { GRID_SIZE, ISO_TILE_W, ISO_TILE_H, GameState, PlayerInput, Ray } from '../types/game';
+import {
+  GRID_SIZE,
+  ISO_TILE_W,
+  ISO_TILE_H,
+  GameState,
+  PlayerInput,
+  Ray,
+} from '../types/game';
 
 const HW = ISO_TILE_W / 2; // 32
 const HH = ISO_TILE_H / 2; // 16
 
-// The 15×15 iso grid spans (14*2)*HW = 896 px wide, (14*2)*HH = 448 px tall.
-const ISO_ORIGIN_X = 640;                   // canvas center X
-const ISO_ORIGIN_Y = (720 - 14 * 2 * HH) / 2; // ≈136 — vertically centers the grid
+const ISO_ORIGIN_X = 640;
+const ISO_ORIGIN_Y = (720 - 14 * 2 * HH) / 2;
 
 const TWEEN_DURATION = 80;
 const RAY_FADE_DURATION = 600;
+const KNOCKBACK_TWEEN_DURATION = 120;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -940,6 +1143,7 @@ export class Game extends Phaser.Scene {
 
   private playerRect!: Phaser.GameObjects.Rectangle;
   private coreGfx!: Phaser.GameObjects.Graphics;
+  private coreFlashGfx!: Phaser.GameObjects.Graphics;
   private enemyRects = new Map<string, Phaser.GameObjects.Rectangle>();
   private raysGraphics!: Phaser.GameObjects.Graphics;
 
@@ -949,10 +1153,16 @@ export class Game extends Phaser.Scene {
   private sKey!: Phaser.Input.Keyboard.Key;
   private dKey!: Phaser.Input.Keyboard.Key;
   private spaceKey!: Phaser.Input.Keyboard.Key;
+  private eKey!: Phaser.Input.Keyboard.Key;
   private lastMoveTime = 0;
 
   private cachedRays: Ray[] = [];
   private rayFadeMs = 0;
+
+  private lastPlayerPos = { x: 0, y: 0 };
+  private isKnockbackAnimating = false;
+  private isPlayerInvulnerable = false;
+  private blinkTimer = 0;
 
   constructor() {
     super({ key: 'Game' });
@@ -981,6 +1191,7 @@ export class Game extends Phaser.Scene {
   update(time: number, delta: number): void {
     this.handleInput(time);
     this.drawRays(delta);
+    this.updateBlink(delta);
   }
 
   // ─── Input ──────────────────────────────────────────────────────────────────
@@ -988,16 +1199,22 @@ export class Game extends Phaser.Scene {
   private setupInput(): void {
     const kb = this.input.keyboard!;
     this.cursors = kb.createCursorKeys();
-    this.wKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.W);
-    this.aKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.A);
-    this.sKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.S);
-    this.dKey     = kb.addKey(Phaser.Input.Keyboard.KeyCodes.D);
+    this.wKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.W);
+    this.aKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.A);
+    this.sKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.S);
+    this.dKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.D);
     this.spaceKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.eKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.E);
   }
 
   private handleInput(time: number): void {
-    if (Phaser.Input.Keyboard.JustDown(this.spaceKey)) {
-      EventBus.emit(Events.PLAYER_INPUT, { type: 'action' } satisfies PlayerInput);
+    if (
+      Phaser.Input.Keyboard.JustDown(this.spaceKey) ||
+      Phaser.Input.Keyboard.JustDown(this.eKey)
+    ) {
+      EventBus.emit(Events.PLAYER_INPUT, {
+        type: 'action',
+      } satisfies PlayerInput);
     }
 
     if (time - this.lastMoveTime < 100) return;
@@ -1025,35 +1242,90 @@ export class Game extends Phaser.Scene {
     this.syncPlayer(state);
     this.syncEnemies(state);
     this.cacheRays(state);
+
+    if (state.coreHit) {
+      this.playCoreHitVFX();
+    }
   }
 
   private syncPlayer(state: GameState): void {
     const pos = toIso(state.player.x, state.player.y);
-    this.tweens.add({
-      targets: this.playerRect,
-      x: pos.x,
-      y: pos.y,
-      duration: TWEEN_DURATION,
-      ease: 'Linear',
-      onComplete: () => {
-        this.playerRect.setDepth(pos.y);
-      },
-    });
-    const color = state.player.status === 'PARALYZED' ? 0xffff00 : 0x44aaff;
-    this.playerRect.setFillStyle(color);
+
+    const movedFar =
+      Math.abs(state.player.x - this.lastPlayerPos.x) > 1 ||
+      Math.abs(state.player.y - this.lastPlayerPos.y) > 1;
+
+    this.lastPlayerPos.x = state.player.x;
+    this.lastPlayerPos.y = state.player.y;
+
+    if (movedFar && !this.isKnockbackAnimating) {
+      this.isKnockbackAnimating = true;
+      this.tweens.killTweensOf(this.playerRect);
+      this.tweens.add({
+        targets: this.playerRect,
+        x: pos.x,
+        y: pos.y,
+        duration: KNOCKBACK_TWEEN_DURATION,
+        ease: 'Power2',
+        onComplete: () => {
+          this.playerRect.setDepth(pos.y);
+          this.isKnockbackAnimating = false;
+        },
+      });
+    } else if (!this.isKnockbackAnimating) {
+      this.tweens.add({
+        targets: this.playerRect,
+        x: pos.x,
+        y: pos.y,
+        duration: TWEEN_DURATION,
+        ease: 'Linear',
+        onComplete: () => {
+          this.playerRect.setDepth(pos.y);
+        },
+      });
+    }
+
+    if (state.player.status === 'PARALYZED') {
+      this.playerRect.setFillStyle(0xffff00);
+      this.playerRect.setAlpha(1);
+      this.blinkTimer = 0;
+    } else if (state.player.isInvulnerable) {
+      this.playerRect.setFillStyle(0x44aaff);
+    } else {
+      this.playerRect.setFillStyle(0x44aaff);
+      this.playerRect.setAlpha(1);
+      this.blinkTimer = 0;
+    }
+  }
+
+  private updateBlink(delta: number): void {
+    if (this.isPlayerInvulnerable) {
+      this.blinkTimer += delta;
+      const blinkCycle = 150;
+      this.playerRect.setAlpha(
+        Math.floor(this.blinkTimer / blinkCycle) % 2 === 0 ? 1 : 0.2,
+      );
+    }
   }
 
   private syncEnemies(state: GameState): void {
+    this.isPlayerInvulnerable = state.player.isInvulnerable;
+
     for (const enemy of state.enemies) {
       const pos = toIso(enemy.x, enemy.y);
 
+      let color = 0xff4444;
+      if (enemy.state === 'CHASE') color = 0xff8800;
+      else if (enemy.state === 'ATTACK') color = 0xff0000;
+
       if (!this.enemyRects.has(enemy.id)) {
         const rect = this.add
-          .rectangle(pos.x, pos.y, 22, 22, 0xff4444)
+          .rectangle(pos.x, pos.y, 22, 22, color)
           .setDepth(pos.y);
         this.enemyRects.set(enemy.id, rect);
       } else {
         const rect = this.enemyRects.get(enemy.id)!;
+        rect.setFillStyle(color);
         this.tweens.add({
           targets: rect,
           x: pos.x,
@@ -1087,9 +1359,67 @@ export class Game extends Phaser.Scene {
     this.raysGraphics.lineStyle(3, 0xff0000, alpha);
     for (const ray of this.cachedRays) {
       const from = toIso(ray.fromX, ray.fromY);
-      const to   = toIso(ray.toX,   ray.toY);
+      const to = toIso(ray.toX, ray.toY);
       this.raysGraphics.lineBetween(from.x, from.y, to.x, to.y);
     }
+  }
+
+  // ─── Core Attack VFX ────────────────────────────────────────────────────────
+
+  private playCoreHitVFX(): void {
+    if (this.coreFlashGfx) {
+      this.coreFlashGfx.clear();
+    } else {
+      this.coreFlashGfx = this.add.graphics();
+    }
+
+    const topLeft = toIso(7, 7);
+    const topRight = toIso(8, 7);
+    const botLeft = toIso(7, 8);
+    const botRight = toIso(8, 8);
+
+    const topVertex = { x: topLeft.x, y: topLeft.y - HH };
+    const rightVertex = { x: topRight.x + HW, y: topRight.y };
+    const bottomVertex = { x: botRight.x, y: botRight.y + HH };
+    const leftVertex = { x: botLeft.x - HW, y: botLeft.y };
+
+    this.coreFlashGfx.setDepth(botRight.y + 1);
+    this.coreFlashGfx.setAlpha(0.8);
+    this.coreFlashGfx.fillStyle(0xffffff, 1);
+    this.coreFlashGfx.fillPoints(
+      [
+        new Phaser.Geom.Point(topVertex.x, topVertex.y),
+        new Phaser.Geom.Point(rightVertex.x, rightVertex.y),
+        new Phaser.Geom.Point(bottomVertex.x, bottomVertex.y),
+        new Phaser.Geom.Point(leftVertex.x, leftVertex.y),
+      ],
+      true,
+    );
+
+    this.tweens.add({
+      targets: this.coreFlashGfx,
+      alpha: 0,
+      duration: 200,
+      ease: 'Power2',
+      onComplete: () => {
+        this.coreFlashGfx.clear();
+      },
+    });
+
+    const originalX = this.coreGfx.x;
+    const originalY = this.coreGfx.y;
+    this.tweens.add({
+      targets: this.coreGfx,
+      x: originalX + Phaser.Math.Between(-3, 3),
+      y: originalY + Phaser.Math.Between(-2, 2),
+      duration: 40,
+      yoyo: true,
+      repeat: 2,
+      ease: 'Sine.easeInOut',
+      onComplete: () => {
+        this.coreGfx.setPosition(originalX, originalY);
+      },
+    });
   }
 
   // ─── Static visuals ─────────────────────────────────────────────────────────
@@ -1098,17 +1428,19 @@ export class Game extends Phaser.Scene {
     const bg = this.add.graphics().setDepth(-2);
     bg.fillStyle(0x0d0d1a, 1);
 
-    // Fill background diamond covering the entire grid
-    const top    = toIso(0, 0);
-    const right  = toIso(GRID_SIZE - 1, 0);
+    const top = toIso(0, 0);
+    const right = toIso(GRID_SIZE - 1, 0);
     const bottom = toIso(GRID_SIZE - 1, GRID_SIZE - 1);
-    const left   = toIso(0, GRID_SIZE - 1);
-    bg.fillPoints([
-      new Phaser.Geom.Point(top.x,    top.y - HH),
-      new Phaser.Geom.Point(right.x + HW, right.y),
-      new Phaser.Geom.Point(bottom.x, bottom.y + HH),
-      new Phaser.Geom.Point(left.x - HW,  left.y),
-    ], true);
+    const left = toIso(0, GRID_SIZE - 1);
+    bg.fillPoints(
+      [
+        new Phaser.Geom.Point(top.x, top.y - HH),
+        new Phaser.Geom.Point(right.x + HW, right.y),
+        new Phaser.Geom.Point(bottom.x, bottom.y + HH),
+        new Phaser.Geom.Point(left.x - HW, left.y),
+      ],
+      true,
+    );
 
     const g = this.add.graphics().setDepth(-1);
     g.lineStyle(1, 0x222244, 1);
@@ -1116,47 +1448,53 @@ export class Game extends Phaser.Scene {
     for (let gx = 0; gx < GRID_SIZE; gx++) {
       for (let gy = 0; gy < GRID_SIZE; gy++) {
         const c = toIso(gx, gy);
-        g.strokePoints([
-          new Phaser.Geom.Point(c.x,      c.y - HH),
-          new Phaser.Geom.Point(c.x + HW, c.y),
-          new Phaser.Geom.Point(c.x,      c.y + HH),
-          new Phaser.Geom.Point(c.x - HW, c.y),
-        ], true);
+        g.strokePoints(
+          [
+            new Phaser.Geom.Point(c.x, c.y - HH),
+            new Phaser.Geom.Point(c.x + HW, c.y),
+            new Phaser.Geom.Point(c.x, c.y + HH),
+            new Phaser.Geom.Point(c.x - HW, c.y),
+          ],
+          true,
+        );
       }
     }
   }
 
   private drawCore(): void {
-    // Core occupies tiles (7,7), (8,7), (7,8), (8,8)
-    // Draw as a single filled isometric quad spanning the 2×2 block
-    const topLeft  = toIso(7, 7);
+    const topLeft = toIso(7, 7);
     const topRight = toIso(8, 7);
-    const botLeft  = toIso(7, 8);
+    const botLeft = toIso(7, 8);
     const botRight = toIso(8, 8);
 
-    // Outer diamond vertices of the 2×2 block
-    const topVertex    = { x: topLeft.x,        y: topLeft.y - HH };
-    const rightVertex  = { x: topRight.x + HW,  y: topRight.y };
-    const bottomVertex = { x: botRight.x,       y: botRight.y + HH };
-    const leftVertex   = { x: botLeft.x - HW,   y: botLeft.y };
+    const topVertex = { x: topLeft.x, y: topLeft.y - HH };
+    const rightVertex = { x: topRight.x + HW, y: topRight.y };
+    const bottomVertex = { x: botRight.x, y: botRight.y + HH };
+    const leftVertex = { x: botLeft.x - HW, y: botLeft.y };
 
     this.coreGfx = this.add.graphics().setDepth(botRight.y);
 
     this.coreGfx.fillStyle(0x00cc66, 1);
-    this.coreGfx.fillPoints([
-      new Phaser.Geom.Point(topVertex.x,    topVertex.y),
-      new Phaser.Geom.Point(rightVertex.x,  rightVertex.y),
-      new Phaser.Geom.Point(bottomVertex.x, bottomVertex.y),
-      new Phaser.Geom.Point(leftVertex.x,   leftVertex.y),
-    ], true);
+    this.coreGfx.fillPoints(
+      [
+        new Phaser.Geom.Point(topVertex.x, topVertex.y),
+        new Phaser.Geom.Point(rightVertex.x, rightVertex.y),
+        new Phaser.Geom.Point(bottomVertex.x, bottomVertex.y),
+        new Phaser.Geom.Point(leftVertex.x, leftVertex.y),
+      ],
+      true,
+    );
 
     this.coreGfx.lineStyle(2, 0x00ffaa, 1);
-    this.coreGfx.strokePoints([
-      new Phaser.Geom.Point(topVertex.x,    topVertex.y),
-      new Phaser.Geom.Point(rightVertex.x,  rightVertex.y),
-      new Phaser.Geom.Point(bottomVertex.x, bottomVertex.y),
-      new Phaser.Geom.Point(leftVertex.x,   leftVertex.y),
-    ], true);
+    this.coreGfx.strokePoints(
+      [
+        new Phaser.Geom.Point(topVertex.x, topVertex.y),
+        new Phaser.Geom.Point(rightVertex.x, rightVertex.y),
+        new Phaser.Geom.Point(bottomVertex.x, bottomVertex.y),
+        new Phaser.Geom.Point(leftVertex.x, leftVertex.y),
+      ],
+      true,
+    );
 
     this.tweens.add({
       targets: this.coreGfx,
@@ -1206,6 +1544,15 @@ export interface Ray {
   toY: number;
 }
 
+export type StalkerState = 'PATROL' | 'CHASE' | 'ATTACK';
+
+export interface EnemyData {
+  id: string;
+  x: number;
+  y: number;
+  state: StalkerState;
+}
+
 export interface GameState {
   room: {
     status: 'ACTIVE' | 'WON' | 'LOST';
@@ -1217,9 +1564,12 @@ export interface GameState {
     y: number;
     status: 'NORMAL' | 'PARALYZED';
     pTimer: number;
+    isInvulnerable: boolean;
+    iTimer: number;
   };
-  enemies: Array<{ id: string; x: number; y: number }>;
+  enemies: EnemyData[];
   rays: Ray[];
+  coreHit: boolean;
 }
 ```
 

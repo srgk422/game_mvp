@@ -24,6 +24,15 @@ export interface Ray {
   toY: number;
 }
 
+export type StalkerState = 'PATROL' | 'CHASE' | 'ATTACK';
+
+export interface EnemyData {
+  id: string;
+  x: number;
+  y: number;
+  state: StalkerState;
+}
+
 export interface GameState {
   room: {
     status: 'ACTIVE' | 'WON' | 'LOST';
@@ -35,7 +44,10 @@ export interface GameState {
     y: number;
     status: 'NORMAL' | 'PARALYZED';
     pTimer: number;
+    isInvulnerable: boolean;
+    iTimer: number;
   };
-  enemies: Array<{ id: string; x: number; y: number }>;
+  enemies: EnemyData[];
   rays: Ray[];
+  coreHit: boolean;
 }

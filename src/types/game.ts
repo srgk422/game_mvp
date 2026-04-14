@@ -8,6 +8,23 @@ export const TILE_SIZE = 48;
 export const ISO_TILE_W = 64;
 export const ISO_TILE_H = 32;
 
+// ─── Server-side simulation constants ─────────────────────────────────────────
+export const SERVER = {
+  TICK_MS: 100,
+  TIMER_DURATION: 120,
+  CORE_HP_MAX: 100,
+  CORE_DAMAGE: 10,
+  PARALYSIS_DURATION: 5,
+  LOS_RANGE: 5,
+  CHASE_RANGE: 5,
+  ATTACK_RANGE: 2,
+  KNOCKBACK_DIST: 2,
+  INVULN_DURATION: 2,
+  ENEMY_MOVE_NORMAL: 5,
+  ENEMY_MOVE_FAST: 3,
+  CHASE_INTERVAL: 3,
+} as const;
+
 // Directions
 export type Direction = 'up' | 'down' | 'left' | 'right';
 

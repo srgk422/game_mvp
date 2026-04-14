@@ -1,6 +1,6 @@
 # Project Snapshot
 
-_Generated: 2026-04-14 00:16_
+_Generated: 2026-04-14 00:30_
 
 ## File tree
 
@@ -211,6 +211,28 @@ _Generated: 2026-04-14 00:16_
 - Удар по ядру (Space/E): белая вспышка поверх ядра с fade-out (200мс) + тряска Graphics (40мс × 3)
 - Depth sorting: `depth = screenY` для всех объектов (игрок, враги, ядро)
 - Ядро блокирует LOS для сталкеров (уже было, сохранено)
+
+---
+
+## [0.5.1] — 2026-04-14 (`main`)
+
+### Code Cleanup & Architectural Alignment — рефакторинг без изменения поведения
+
+**Изменены файлы:**
+
+| Файл | Что изменилось |
+|---|---|
+| `src/types/game.ts` | Добавлен экспортируемый объект `SERVER` — все игровые константы симуляции вынесены из `ServerEmulator.ts` в единый конфиг |
+| `src/core/ServerEmulator.ts` | Декомпозиция `tick()`: выделены `processPlayerInput()`, `updateRoomTimer()`, `handleStatusEffects()`, `updateStalkers()`, `processCombat()`, `checkWinLoss()`; `checkParalysis()` переименована в `processCombat()` с early returns; `if/else if/else` в `updateEnemyFSM()` заменён на `continue`-цепочку; все магические числа заменены ссылками на `SERVER.*` |
+| `src/scenes/Game.ts` | Добавлены константные объекты `VFX` и `COLORS`; `drawRays()` → `drawStalkerRays()`; `playCoreHitVFX()` → `applyCoreVFX()`; `updateBlink()` → `tickInvulnerabilityBlink()`; визуальная логика игрока вынесена из `syncPlayer()` в `updatePlayerVisuals(state)` |
+
+**Соглашения:**
+- `SERVER` в `types/game.ts` — единый источник истины для всех численных параметров симуляции
+- `VFX` / `COLORS` в `Game.ts` — именованные константы для всех magic-numbers рендеринга и цветов
+- `tick()` в `ServerEmulator` теперь читается как линейная последовательность шагов без вложенности
+- Изометрия (`toIso()`), Screen-Aligned управление (`playerStep()`/`step()`), depth sorting (`setDepth(pos.y)`) — не затронуты
+
+---
 ```
 
 ### `index.html`
@@ -658,6 +680,7 @@ export const Events = {
 import { EventBus, Events } from './EventBus';
 import {
   GRID_SIZE,
+  SERVER,
   Direction,
   PlayerInput,
   GameState,
@@ -668,23 +691,7 @@ import {
 export type { Direction, PlayerInput, GameState, EnemyData, StalkerState };
 export type { Ray } from '../types/game';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const TICK_MS = 100;
-const TIMER_DURATION = 120;
-const CORE_HP_MAX = 100;
-const CORE_DAMAGE = 10;
-const PARALYSIS_DURATION = 5;
-const LOS_RANGE = 5;
-const ENEMY_MOVE_NORMAL = 5;  // ticks between moves (~500 ms) — PATROL
-const ENEMY_MOVE_FAST = 3;    // ticks between moves at <30% core HP (~300 ms)
-const CHASE_INTERVAL = 3;     // ticks between moves in CHASE mode (~300 ms)
-
-const CHASE_RANGE = 5;
-const ATTACK_RANGE = 2;
-
-const KNOCKBACK_DIST = 2;
-const INVULN_DURATION = 2;    // seconds after paralysis ends
+// ─── Static data ──────────────────────────────────────────────────────────────
 
 const CORE_TILES = [
   { x: 7, y: 7 },
@@ -717,7 +724,7 @@ export class ServerEmulator {
   start(): void {
     EventBus.on(Events.PLAYER_INPUT, this.onPlayerInput, this);
     EventBus.emit(Events.SERVER_UPDATE, this.snapshot());
-    this.tickHandle = setInterval(() => this.tick(), TICK_MS);
+    this.tickHandle = setInterval(() => this.tick(), SERVER.TICK_MS);
   }
 
   stop(): void {
@@ -741,8 +748,20 @@ export class ServerEmulator {
     if (this.state.room.status !== 'ACTIVE') return;
 
     this.state.coreHit = false;
+    this.processPlayerInput();
+    this.updateRoomTimer();
+    this.handleStatusEffects();
+    this.updateStalkers();
+    this.state.rays = [];
+    this.processCombat();
+    this.checkWinLoss();
 
-    // 1. Player input
+    EventBus.emit(Events.SERVER_UPDATE, this.snapshot());
+  }
+
+  // ─── Private: tick sub-steps ────────────────────────────────────────────────
+
+  private processPlayerInput(): void {
     if (this.pendingDir !== null) {
       this.applyMove(this.pendingDir);
       this.pendingDir = null;
@@ -751,50 +770,46 @@ export class ServerEmulator {
       this.applyAction();
       this.pendingAction = false;
     }
+  }
 
-    // 2. Timers
+  private updateRoomTimer(): void {
     this.state.room.timer = Math.max(
       0,
-      +(this.state.room.timer - TICK_MS / 1000).toFixed(2),
+      +(this.state.room.timer - SERVER.TICK_MS / 1000).toFixed(2),
     );
+  }
 
-    if (this.state.player.status === 'PARALYZED') {
-      this.state.player.pTimer -= TICK_MS / 1000;
-      if (this.state.player.pTimer <= 0) {
-        this.state.player.status = 'NORMAL';
-        this.state.player.pTimer = 0;
-        this.state.player.isInvulnerable = true;
-        this.state.player.iTimer = INVULN_DURATION;
+  private handleStatusEffects(): void {
+    const p = this.state.player;
+
+    if (p.status === 'PARALYZED') {
+      p.pTimer -= SERVER.TICK_MS / 1000;
+      if (p.pTimer <= 0) {
+        p.status = 'NORMAL';
+        p.pTimer = 0;
+        p.isInvulnerable = true;
+        p.iTimer = SERVER.INVULN_DURATION;
       }
+      return;
     }
 
-    if (this.state.player.isInvulnerable) {
-      this.state.player.iTimer -= TICK_MS / 1000;
-      if (this.state.player.iTimer <= 0) {
-        this.state.player.isInvulnerable = false;
-        this.state.player.iTimer = 0;
-      }
-    }
+    if (!p.isInvulnerable) return;
 
-    // 3. Enemy FSM + movement
+    p.iTimer -= SERVER.TICK_MS / 1000;
+    if (p.iTimer <= 0) {
+      p.isInvulnerable = false;
+      p.iTimer = 0;
+    }
+  }
+
+  private updateStalkers(): void {
     this.updateEnemyFSM();
     this.moveEnemies();
+  }
 
-    // 4. LOS / paralysis check
-    this.state.rays = [];
-    if (
-      this.state.player.status === 'NORMAL' &&
-      !this.state.player.isInvulnerable
-    ) {
-      this.checkParalysis();
-    }
-
-    // 5. Win / loss conditions
+  private checkWinLoss(): void {
     if (this.state.room.coreHP <= 0) this.state.room.status = 'WON';
     else if (this.state.room.timer <= 0) this.state.room.status = 'LOST';
-
-    // 6. Broadcast
-    EventBus.emit(Events.SERVER_UPDATE, this.snapshot());
   }
 
   // ─── Private: game logic ────────────────────────────────────────────────────
@@ -815,7 +830,7 @@ export class ServerEmulator {
     if (this.isAdjacentToCore(x, y)) {
       this.state.room.coreHP = Math.max(
         0,
-        this.state.room.coreHP - CORE_DAMAGE,
+        this.state.room.coreHP - SERVER.CORE_DAMAGE,
       );
       this.state.coreHit = true;
     }
@@ -841,28 +856,31 @@ export class ServerEmulator {
       }
 
       const dist = Math.abs(e.x - px) + Math.abs(e.y - py);
-
-      const sameRow = e.y === py;
-      const sameCol = e.x === px;
       const dx = Math.abs(e.x - px);
       const dy = Math.abs(e.y - py);
       const inAttackRange =
-        (sameRow && dx > 0 && dx <= ATTACK_RANGE) ||
-        (sameCol && dy > 0 && dy <= ATTACK_RANGE);
+        (e.y === py && dx > 0 && dx <= SERVER.ATTACK_RANGE) ||
+        (e.x === px && dy > 0 && dy <= SERVER.ATTACK_RANGE);
 
       if (inAttackRange && this.hasLOS(e.x, e.y, px, py)) {
         e.state = 'ATTACK';
-      } else if (dist <= CHASE_RANGE) {
-        e.state = 'CHASE';
-      } else {
-        e.state = 'PATROL';
+        continue;
       }
+
+      if (dist <= SERVER.CHASE_RANGE) {
+        e.state = 'CHASE';
+        continue;
+      }
+
+      e.state = 'PATROL';
     }
   }
 
   private moveEnemies(): void {
     const patrolInterval =
-      this.state.room.coreHP < 30 ? ENEMY_MOVE_FAST : ENEMY_MOVE_NORMAL;
+      this.state.room.coreHP < 30
+        ? SERVER.ENEMY_MOVE_FAST
+        : SERVER.ENEMY_MOVE_NORMAL;
     const dirs: Direction[] = ['up', 'down', 'left', 'right'];
 
     for (let i = 0; i < this.state.enemies.length; i++) {
@@ -870,7 +888,8 @@ export class ServerEmulator {
 
       if (e.state === 'ATTACK') continue;
 
-      const interval = e.state === 'CHASE' ? CHASE_INTERVAL : patrolInterval;
+      const interval =
+        e.state === 'CHASE' ? SERVER.CHASE_INTERVAL : patrolInterval;
 
       this.enemyCounters[i]++;
       if (this.enemyCounters[i] < interval) continue;
@@ -878,19 +897,20 @@ export class ServerEmulator {
 
       if (e.state === 'CHASE') {
         this.moveTowardsPlayer(e);
-      } else {
-        const shuffled = [...dirs];
-        for (let j = shuffled.length - 1; j > 0; j--) {
-          const k = Math.floor(Math.random() * (j + 1));
-          [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
-        }
-        for (const dir of shuffled) {
-          const next = this.step(e.x, e.y, dir);
-          if (!this.isBlocked(next.x, next.y)) {
-            e.x = next.x;
-            e.y = next.y;
-            break;
-          }
+        continue;
+      }
+
+      const shuffled = [...dirs];
+      for (let j = shuffled.length - 1; j > 0; j--) {
+        const k = Math.floor(Math.random() * (j + 1));
+        [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
+      }
+      for (const dir of shuffled) {
+        const next = this.step(e.x, e.y, dir);
+        if (!this.isBlocked(next.x, next.y)) {
+          e.x = next.x;
+          e.y = next.y;
+          break;
         }
       }
     }
@@ -920,9 +940,12 @@ export class ServerEmulator {
     }
   }
 
-  // ─── Paralysis + Knockback ──────────────────────────────────────────────────
+  // ─── Combat: LOS rays + paralysis ───────────────────────────────────────────
 
-  private checkParalysis(): void {
+  private processCombat(): void {
+    if (this.state.player.status !== 'NORMAL') return;
+    if (this.state.player.isInvulnerable) return;
+
     const { x: px, y: py } = this.state.player;
 
     for (const enemy of this.state.enemies) {
@@ -930,26 +953,24 @@ export class ServerEmulator {
 
       const dx = Math.abs(enemy.x - px);
       const dy = Math.abs(enemy.y - py);
+      const sameRow = enemy.y === py && dx > 0 && dx <= SERVER.ATTACK_RANGE;
+      const sameCol = enemy.x === px && dy > 0 && dy <= SERVER.ATTACK_RANGE;
 
-      const sameRow = enemy.y === py && dx > 0 && dx <= ATTACK_RANGE;
-      const sameCol = enemy.x === px && dy > 0 && dy <= ATTACK_RANGE;
+      if (!(sameRow || sameCol)) continue;
+      if (!this.hasLOS(enemy.x, enemy.y, px, py)) continue;
 
-      if ((sameRow || sameCol) && this.hasLOS(enemy.x, enemy.y, px, py)) {
-        this.state.player.status = 'PARALYZED';
-        this.state.player.pTimer = PARALYSIS_DURATION;
-        this.state.rays.push({
-          fromX: enemy.x,
-          fromY: enemy.y,
-          toX: px,
-          toY: py,
-        });
+      this.state.player.status = 'PARALYZED';
+      this.state.player.pTimer = SERVER.PARALYSIS_DURATION;
+      this.state.rays.push({
+        fromX: enemy.x,
+        fromY: enemy.y,
+        toX: px,
+        toY: py,
+      });
 
-        this.applyKnockback(enemy.x, enemy.y);
-
-        enemy.state = 'PATROL';
-
-        return;
-      }
+      this.applyKnockback(enemy.x, enemy.y);
+      enemy.state = 'PATROL';
+      return;
     }
   }
 
@@ -958,20 +979,16 @@ export class ServerEmulator {
     const dx = p.x - ex;
     const dy = p.y - ey;
 
-    let dirX = 0;
-    let dirY = 0;
-
-    if (dx !== 0) dirX = Math.sign(dx);
-    if (dy !== 0) dirY = Math.sign(dy);
-
+    let dirX = dx !== 0 ? Math.sign(dx) : 0;
+    let dirY = dy !== 0 ? Math.sign(dy) : 0;
     if (dirX === 0 && dirY === 0) dirX = 1;
 
     let finalX = p.x;
     let finalY = p.y;
 
-    for (let step = 1; step <= KNOCKBACK_DIST; step++) {
-      const nx = p.x + dirX * step;
-      const ny = p.y + dirY * step;
+    for (let s = 1; s <= SERVER.KNOCKBACK_DIST; s++) {
+      const nx = p.x + dirX * s;
+      const ny = p.y + dirY * s;
       if (this.isBlocked(nx, ny)) break;
       finalX = nx;
       finalY = ny;
@@ -1047,7 +1064,11 @@ export class ServerEmulator {
 
   private createInitialState(): GameState {
     return {
-      room: { status: 'ACTIVE', timer: TIMER_DURATION, coreHP: CORE_HP_MAX },
+      room: {
+        status: 'ACTIVE',
+        timer: SERVER.TIMER_DURATION,
+        coreHP: SERVER.CORE_HP_MAX,
+      },
       player: {
         x: 1,
         y: 7,
@@ -1124,8 +1145,39 @@ const ISO_ORIGIN_X = 640;
 const ISO_ORIGIN_Y = (720 - 14 * 2 * HH) / 2;
 
 const TWEEN_DURATION = 80;
-const RAY_FADE_DURATION = 600;
 const KNOCKBACK_TWEEN_DURATION = 120;
+
+// ─── VFX constants ────────────────────────────────────────────────────────────
+
+const VFX = {
+  RAY_LINE_WIDTH: 3,
+  RAY_MAX_ALPHA: 0.9,
+  RAY_FADE_MS: 600,
+  BLINK_CYCLE_MS: 150,
+  BLINK_MIN_ALPHA: 0.2,
+  CORE_FLASH_ALPHA: 0.8,
+  CORE_FLASH_FADE_MS: 200,
+  SHAKE_DURATION_MS: 40,
+  SHAKE_REPEATS: 2,
+  SHAKE_X_RANGE: 3,
+  SHAKE_Y_RANGE: 2,
+  CORE_PULSE_ALPHA: 0.6,
+  CORE_PULSE_MS: 900,
+} as const;
+
+const COLORS = {
+  PLAYER_NORMAL: 0x44aaff,
+  PLAYER_PARALYZED: 0xffff00,
+  ENEMY_PATROL: 0xff4444,
+  ENEMY_CHASE: 0xff8800,
+  ENEMY_ATTACK: 0xff0000,
+  RAY: 0xff0000,
+  CORE_FILL: 0x00cc66,
+  CORE_STROKE: 0x00ffaa,
+  CORE_FLASH: 0xffffff,
+  GRID_LINE: 0x222244,
+  GRID_BG: 0x0d0d1a,
+} as const;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1174,7 +1226,7 @@ export class Game extends Phaser.Scene {
     this.drawGrid();
     this.drawCore();
 
-    this.playerRect = this.add.rectangle(-100, -100, 24, 24, 0x44aaff);
+    this.playerRect = this.add.rectangle(-100, -100, 24, 24, COLORS.PLAYER_NORMAL);
     this.playerRect.setDepth(0);
 
     this.raysGraphics = this.add.graphics().setDepth(1000);
@@ -1190,8 +1242,8 @@ export class Game extends Phaser.Scene {
 
   update(time: number, delta: number): void {
     this.handleInput(time);
-    this.drawRays(delta);
-    this.updateBlink(delta);
+    this.drawStalkerRays(delta);
+    this.tickInvulnerabilityBlink(delta);
   }
 
   // ─── Input ──────────────────────────────────────────────────────────────────
@@ -1244,7 +1296,7 @@ export class Game extends Phaser.Scene {
     this.cacheRays(state);
 
     if (state.coreHit) {
-      this.playCoreHitVFX();
+      this.applyCoreVFX();
     }
   }
 
@@ -1285,27 +1337,35 @@ export class Game extends Phaser.Scene {
       });
     }
 
+    this.updatePlayerVisuals(state);
+  }
+
+  // ─── Player visuals (color + blink state) ───────────────────────────────────
+
+  private updatePlayerVisuals(state: GameState): void {
     if (state.player.status === 'PARALYZED') {
-      this.playerRect.setFillStyle(0xffff00);
+      this.playerRect.setFillStyle(COLORS.PLAYER_PARALYZED);
       this.playerRect.setAlpha(1);
       this.blinkTimer = 0;
-    } else if (state.player.isInvulnerable) {
-      this.playerRect.setFillStyle(0x44aaff);
-    } else {
-      this.playerRect.setFillStyle(0x44aaff);
+      return;
+    }
+
+    this.playerRect.setFillStyle(COLORS.PLAYER_NORMAL);
+    if (!state.player.isInvulnerable) {
       this.playerRect.setAlpha(1);
       this.blinkTimer = 0;
     }
   }
 
-  private updateBlink(delta: number): void {
-    if (this.isPlayerInvulnerable) {
-      this.blinkTimer += delta;
-      const blinkCycle = 150;
-      this.playerRect.setAlpha(
-        Math.floor(this.blinkTimer / blinkCycle) % 2 === 0 ? 1 : 0.2,
-      );
-    }
+  private tickInvulnerabilityBlink(delta: number): void {
+    if (!this.isPlayerInvulnerable) return;
+
+    this.blinkTimer += delta;
+    this.playerRect.setAlpha(
+      Math.floor(this.blinkTimer / VFX.BLINK_CYCLE_MS) % 2 === 0
+        ? 1
+        : VFX.BLINK_MIN_ALPHA,
+    );
   }
 
   private syncEnemies(state: GameState): void {
@@ -1314,9 +1374,9 @@ export class Game extends Phaser.Scene {
     for (const enemy of state.enemies) {
       const pos = toIso(enemy.x, enemy.y);
 
-      let color = 0xff4444;
-      if (enemy.state === 'CHASE') color = 0xff8800;
-      else if (enemy.state === 'ATTACK') color = 0xff0000;
+      let color: number = COLORS.ENEMY_PATROL;
+      if (enemy.state === 'CHASE') color = COLORS.ENEMY_CHASE;
+      else if (enemy.state === 'ATTACK') color = COLORS.ENEMY_ATTACK;
 
       if (!this.enemyRects.has(enemy.id)) {
         const rect = this.add
@@ -1343,20 +1403,20 @@ export class Game extends Phaser.Scene {
   private cacheRays(state: GameState): void {
     if (state.rays.length > 0) {
       this.cachedRays = state.rays;
-      this.rayFadeMs = RAY_FADE_DURATION;
+      this.rayFadeMs = VFX.RAY_FADE_MS;
     }
   }
 
   // ─── Ray rendering (per-frame fade) ─────────────────────────────────────────
 
-  private drawRays(delta: number): void {
+  private drawStalkerRays(delta: number): void {
     this.raysGraphics.clear();
     if (this.rayFadeMs <= 0 || this.cachedRays.length === 0) return;
 
     this.rayFadeMs -= delta;
-    const alpha = Math.max(0, this.rayFadeMs / RAY_FADE_DURATION) * 0.9;
+    const alpha = Math.max(0, this.rayFadeMs / VFX.RAY_FADE_MS) * VFX.RAY_MAX_ALPHA;
 
-    this.raysGraphics.lineStyle(3, 0xff0000, alpha);
+    this.raysGraphics.lineStyle(VFX.RAY_LINE_WIDTH, COLORS.RAY, alpha);
     for (const ray of this.cachedRays) {
       const from = toIso(ray.fromX, ray.fromY);
       const to = toIso(ray.toX, ray.toY);
@@ -1366,7 +1426,7 @@ export class Game extends Phaser.Scene {
 
   // ─── Core Attack VFX ────────────────────────────────────────────────────────
 
-  private playCoreHitVFX(): void {
+  private applyCoreVFX(): void {
     if (this.coreFlashGfx) {
       this.coreFlashGfx.clear();
     } else {
@@ -1384,8 +1444,8 @@ export class Game extends Phaser.Scene {
     const leftVertex = { x: botLeft.x - HW, y: botLeft.y };
 
     this.coreFlashGfx.setDepth(botRight.y + 1);
-    this.coreFlashGfx.setAlpha(0.8);
-    this.coreFlashGfx.fillStyle(0xffffff, 1);
+    this.coreFlashGfx.setAlpha(VFX.CORE_FLASH_ALPHA);
+    this.coreFlashGfx.fillStyle(COLORS.CORE_FLASH, 1);
     this.coreFlashGfx.fillPoints(
       [
         new Phaser.Geom.Point(topVertex.x, topVertex.y),
@@ -1399,7 +1459,7 @@ export class Game extends Phaser.Scene {
     this.tweens.add({
       targets: this.coreFlashGfx,
       alpha: 0,
-      duration: 200,
+      duration: VFX.CORE_FLASH_FADE_MS,
       ease: 'Power2',
       onComplete: () => {
         this.coreFlashGfx.clear();
@@ -1410,11 +1470,11 @@ export class Game extends Phaser.Scene {
     const originalY = this.coreGfx.y;
     this.tweens.add({
       targets: this.coreGfx,
-      x: originalX + Phaser.Math.Between(-3, 3),
-      y: originalY + Phaser.Math.Between(-2, 2),
-      duration: 40,
+      x: originalX + Phaser.Math.Between(-VFX.SHAKE_X_RANGE, VFX.SHAKE_X_RANGE),
+      y: originalY + Phaser.Math.Between(-VFX.SHAKE_Y_RANGE, VFX.SHAKE_Y_RANGE),
+      duration: VFX.SHAKE_DURATION_MS,
       yoyo: true,
-      repeat: 2,
+      repeat: VFX.SHAKE_REPEATS,
       ease: 'Sine.easeInOut',
       onComplete: () => {
         this.coreGfx.setPosition(originalX, originalY);
@@ -1426,7 +1486,7 @@ export class Game extends Phaser.Scene {
 
   private drawGrid(): void {
     const bg = this.add.graphics().setDepth(-2);
-    bg.fillStyle(0x0d0d1a, 1);
+    bg.fillStyle(COLORS.GRID_BG, 1);
 
     const top = toIso(0, 0);
     const right = toIso(GRID_SIZE - 1, 0);
@@ -1443,7 +1503,7 @@ export class Game extends Phaser.Scene {
     );
 
     const g = this.add.graphics().setDepth(-1);
-    g.lineStyle(1, 0x222244, 1);
+    g.lineStyle(1, COLORS.GRID_LINE, 1);
 
     for (let gx = 0; gx < GRID_SIZE; gx++) {
       for (let gy = 0; gy < GRID_SIZE; gy++) {
@@ -1474,7 +1534,7 @@ export class Game extends Phaser.Scene {
 
     this.coreGfx = this.add.graphics().setDepth(botRight.y);
 
-    this.coreGfx.fillStyle(0x00cc66, 1);
+    this.coreGfx.fillStyle(COLORS.CORE_FILL, 1);
     this.coreGfx.fillPoints(
       [
         new Phaser.Geom.Point(topVertex.x, topVertex.y),
@@ -1485,7 +1545,7 @@ export class Game extends Phaser.Scene {
       true,
     );
 
-    this.coreGfx.lineStyle(2, 0x00ffaa, 1);
+    this.coreGfx.lineStyle(2, COLORS.CORE_STROKE, 1);
     this.coreGfx.strokePoints(
       [
         new Phaser.Geom.Point(topVertex.x, topVertex.y),
@@ -1498,10 +1558,10 @@ export class Game extends Phaser.Scene {
 
     this.tweens.add({
       targets: this.coreGfx,
-      alpha: 0.6,
+      alpha: VFX.CORE_PULSE_ALPHA,
       yoyo: true,
       repeat: -1,
-      duration: 900,
+      duration: VFX.CORE_PULSE_MS,
       ease: 'Sine.easeInOut',
     });
   }
@@ -1527,6 +1587,23 @@ export const TILE_SIZE = 48;
 // Isometric tile dimensions (2:1 diamond)
 export const ISO_TILE_W = 64;
 export const ISO_TILE_H = 32;
+
+// ─── Server-side simulation constants ─────────────────────────────────────────
+export const SERVER = {
+  TICK_MS: 100,
+  TIMER_DURATION: 120,
+  CORE_HP_MAX: 100,
+  CORE_DAMAGE: 10,
+  PARALYSIS_DURATION: 5,
+  LOS_RANGE: 5,
+  CHASE_RANGE: 5,
+  ATTACK_RANGE: 2,
+  KNOCKBACK_DIST: 2,
+  INVULN_DURATION: 2,
+  ENEMY_MOVE_NORMAL: 5,
+  ENEMY_MOVE_FAST: 3,
+  CHASE_INTERVAL: 3,
+} as const;
 
 // Directions
 export type Direction = 'up' | 'down' | 'left' | 'right';

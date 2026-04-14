@@ -17,8 +17,39 @@ const ISO_ORIGIN_X = 640;
 const ISO_ORIGIN_Y = (720 - 14 * 2 * HH) / 2;
 
 const TWEEN_DURATION = 80;
-const RAY_FADE_DURATION = 600;
 const KNOCKBACK_TWEEN_DURATION = 120;
+
+// ─── VFX constants ────────────────────────────────────────────────────────────
+
+const VFX = {
+  RAY_LINE_WIDTH: 3,
+  RAY_MAX_ALPHA: 0.9,
+  RAY_FADE_MS: 600,
+  BLINK_CYCLE_MS: 150,
+  BLINK_MIN_ALPHA: 0.2,
+  CORE_FLASH_ALPHA: 0.8,
+  CORE_FLASH_FADE_MS: 200,
+  SHAKE_DURATION_MS: 40,
+  SHAKE_REPEATS: 2,
+  SHAKE_X_RANGE: 3,
+  SHAKE_Y_RANGE: 2,
+  CORE_PULSE_ALPHA: 0.6,
+  CORE_PULSE_MS: 900,
+} as const;
+
+const COLORS = {
+  PLAYER_NORMAL: 0x44aaff,
+  PLAYER_PARALYZED: 0xffff00,
+  ENEMY_PATROL: 0xff4444,
+  ENEMY_CHASE: 0xff8800,
+  ENEMY_ATTACK: 0xff0000,
+  RAY: 0xff0000,
+  CORE_FILL: 0x00cc66,
+  CORE_STROKE: 0x00ffaa,
+  CORE_FLASH: 0xffffff,
+  GRID_LINE: 0x222244,
+  GRID_BG: 0x0d0d1a,
+} as const;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -67,7 +98,7 @@ export class Game extends Phaser.Scene {
     this.drawGrid();
     this.drawCore();
 
-    this.playerRect = this.add.rectangle(-100, -100, 24, 24, 0x44aaff);
+    this.playerRect = this.add.rectangle(-100, -100, 24, 24, COLORS.PLAYER_NORMAL);
     this.playerRect.setDepth(0);
 
     this.raysGraphics = this.add.graphics().setDepth(1000);
@@ -83,8 +114,8 @@ export class Game extends Phaser.Scene {
 
   update(time: number, delta: number): void {
     this.handleInput(time);
-    this.drawRays(delta);
-    this.updateBlink(delta);
+    this.drawStalkerRays(delta);
+    this.tickInvulnerabilityBlink(delta);
   }
 
   // ─── Input ──────────────────────────────────────────────────────────────────
@@ -137,7 +168,7 @@ export class Game extends Phaser.Scene {
     this.cacheRays(state);
 
     if (state.coreHit) {
-      this.playCoreHitVFX();
+      this.applyCoreVFX();
     }
   }
 
@@ -178,27 +209,35 @@ export class Game extends Phaser.Scene {
       });
     }
 
+    this.updatePlayerVisuals(state);
+  }
+
+  // ─── Player visuals (color + blink state) ───────────────────────────────────
+
+  private updatePlayerVisuals(state: GameState): void {
     if (state.player.status === 'PARALYZED') {
-      this.playerRect.setFillStyle(0xffff00);
+      this.playerRect.setFillStyle(COLORS.PLAYER_PARALYZED);
       this.playerRect.setAlpha(1);
       this.blinkTimer = 0;
-    } else if (state.player.isInvulnerable) {
-      this.playerRect.setFillStyle(0x44aaff);
-    } else {
-      this.playerRect.setFillStyle(0x44aaff);
+      return;
+    }
+
+    this.playerRect.setFillStyle(COLORS.PLAYER_NORMAL);
+    if (!state.player.isInvulnerable) {
       this.playerRect.setAlpha(1);
       this.blinkTimer = 0;
     }
   }
 
-  private updateBlink(delta: number): void {
-    if (this.isPlayerInvulnerable) {
-      this.blinkTimer += delta;
-      const blinkCycle = 150;
-      this.playerRect.setAlpha(
-        Math.floor(this.blinkTimer / blinkCycle) % 2 === 0 ? 1 : 0.2,
-      );
-    }
+  private tickInvulnerabilityBlink(delta: number): void {
+    if (!this.isPlayerInvulnerable) return;
+
+    this.blinkTimer += delta;
+    this.playerRect.setAlpha(
+      Math.floor(this.blinkTimer / VFX.BLINK_CYCLE_MS) % 2 === 0
+        ? 1
+        : VFX.BLINK_MIN_ALPHA,
+    );
   }
 
   private syncEnemies(state: GameState): void {
@@ -207,9 +246,9 @@ export class Game extends Phaser.Scene {
     for (const enemy of state.enemies) {
       const pos = toIso(enemy.x, enemy.y);
 
-      let color = 0xff4444;
-      if (enemy.state === 'CHASE') color = 0xff8800;
-      else if (enemy.state === 'ATTACK') color = 0xff0000;
+      let color: number = COLORS.ENEMY_PATROL;
+      if (enemy.state === 'CHASE') color = COLORS.ENEMY_CHASE;
+      else if (enemy.state === 'ATTACK') color = COLORS.ENEMY_ATTACK;
 
       if (!this.enemyRects.has(enemy.id)) {
         const rect = this.add
@@ -236,20 +275,20 @@ export class Game extends Phaser.Scene {
   private cacheRays(state: GameState): void {
     if (state.rays.length > 0) {
       this.cachedRays = state.rays;
-      this.rayFadeMs = RAY_FADE_DURATION;
+      this.rayFadeMs = VFX.RAY_FADE_MS;
     }
   }
 
   // ─── Ray rendering (per-frame fade) ─────────────────────────────────────────
 
-  private drawRays(delta: number): void {
+  private drawStalkerRays(delta: number): void {
     this.raysGraphics.clear();
     if (this.rayFadeMs <= 0 || this.cachedRays.length === 0) return;
 
     this.rayFadeMs -= delta;
-    const alpha = Math.max(0, this.rayFadeMs / RAY_FADE_DURATION) * 0.9;
+    const alpha = Math.max(0, this.rayFadeMs / VFX.RAY_FADE_MS) * VFX.RAY_MAX_ALPHA;
 
-    this.raysGraphics.lineStyle(3, 0xff0000, alpha);
+    this.raysGraphics.lineStyle(VFX.RAY_LINE_WIDTH, COLORS.RAY, alpha);
     for (const ray of this.cachedRays) {
       const from = toIso(ray.fromX, ray.fromY);
       const to = toIso(ray.toX, ray.toY);
@@ -259,7 +298,7 @@ export class Game extends Phaser.Scene {
 
   // ─── Core Attack VFX ────────────────────────────────────────────────────────
 
-  private playCoreHitVFX(): void {
+  private applyCoreVFX(): void {
     if (this.coreFlashGfx) {
       this.coreFlashGfx.clear();
     } else {
@@ -277,8 +316,8 @@ export class Game extends Phaser.Scene {
     const leftVertex = { x: botLeft.x - HW, y: botLeft.y };
 
     this.coreFlashGfx.setDepth(botRight.y + 1);
-    this.coreFlashGfx.setAlpha(0.8);
-    this.coreFlashGfx.fillStyle(0xffffff, 1);
+    this.coreFlashGfx.setAlpha(VFX.CORE_FLASH_ALPHA);
+    this.coreFlashGfx.fillStyle(COLORS.CORE_FLASH, 1);
     this.coreFlashGfx.fillPoints(
       [
         new Phaser.Geom.Point(topVertex.x, topVertex.y),
@@ -292,7 +331,7 @@ export class Game extends Phaser.Scene {
     this.tweens.add({
       targets: this.coreFlashGfx,
       alpha: 0,
-      duration: 200,
+      duration: VFX.CORE_FLASH_FADE_MS,
       ease: 'Power2',
       onComplete: () => {
         this.coreFlashGfx.clear();
@@ -303,11 +342,11 @@ export class Game extends Phaser.Scene {
     const originalY = this.coreGfx.y;
     this.tweens.add({
       targets: this.coreGfx,
-      x: originalX + Phaser.Math.Between(-3, 3),
-      y: originalY + Phaser.Math.Between(-2, 2),
-      duration: 40,
+      x: originalX + Phaser.Math.Between(-VFX.SHAKE_X_RANGE, VFX.SHAKE_X_RANGE),
+      y: originalY + Phaser.Math.Between(-VFX.SHAKE_Y_RANGE, VFX.SHAKE_Y_RANGE),
+      duration: VFX.SHAKE_DURATION_MS,
       yoyo: true,
-      repeat: 2,
+      repeat: VFX.SHAKE_REPEATS,
       ease: 'Sine.easeInOut',
       onComplete: () => {
         this.coreGfx.setPosition(originalX, originalY);
@@ -319,7 +358,7 @@ export class Game extends Phaser.Scene {
 
   private drawGrid(): void {
     const bg = this.add.graphics().setDepth(-2);
-    bg.fillStyle(0x0d0d1a, 1);
+    bg.fillStyle(COLORS.GRID_BG, 1);
 
     const top = toIso(0, 0);
     const right = toIso(GRID_SIZE - 1, 0);
@@ -336,7 +375,7 @@ export class Game extends Phaser.Scene {
     );
 
     const g = this.add.graphics().setDepth(-1);
-    g.lineStyle(1, 0x222244, 1);
+    g.lineStyle(1, COLORS.GRID_LINE, 1);
 
     for (let gx = 0; gx < GRID_SIZE; gx++) {
       for (let gy = 0; gy < GRID_SIZE; gy++) {
@@ -367,7 +406,7 @@ export class Game extends Phaser.Scene {
 
     this.coreGfx = this.add.graphics().setDepth(botRight.y);
 
-    this.coreGfx.fillStyle(0x00cc66, 1);
+    this.coreGfx.fillStyle(COLORS.CORE_FILL, 1);
     this.coreGfx.fillPoints(
       [
         new Phaser.Geom.Point(topVertex.x, topVertex.y),
@@ -378,7 +417,7 @@ export class Game extends Phaser.Scene {
       true,
     );
 
-    this.coreGfx.lineStyle(2, 0x00ffaa, 1);
+    this.coreGfx.lineStyle(2, COLORS.CORE_STROKE, 1);
     this.coreGfx.strokePoints(
       [
         new Phaser.Geom.Point(topVertex.x, topVertex.y),
@@ -391,10 +430,10 @@ export class Game extends Phaser.Scene {
 
     this.tweens.add({
       targets: this.coreGfx,
-      alpha: 0.6,
+      alpha: VFX.CORE_PULSE_ALPHA,
       yoyo: true,
       repeat: -1,
-      duration: 900,
+      duration: VFX.CORE_PULSE_MS,
       ease: 'Sine.easeInOut',
     });
   }

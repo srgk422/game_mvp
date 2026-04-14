@@ -1,6 +1,7 @@
 import { EventBus, Events } from './EventBus';
 import {
   GRID_SIZE,
+  SERVER,
   Direction,
   PlayerInput,
   GameState,
@@ -11,23 +12,7 @@ import {
 export type { Direction, PlayerInput, GameState, EnemyData, StalkerState };
 export type { Ray } from '../types/game';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const TICK_MS = 100;
-const TIMER_DURATION = 120;
-const CORE_HP_MAX = 100;
-const CORE_DAMAGE = 10;
-const PARALYSIS_DURATION = 5;
-const LOS_RANGE = 5;
-const ENEMY_MOVE_NORMAL = 5;  // ticks between moves (~500 ms) — PATROL
-const ENEMY_MOVE_FAST = 3;    // ticks between moves at <30% core HP (~300 ms)
-const CHASE_INTERVAL = 3;     // ticks between moves in CHASE mode (~300 ms)
-
-const CHASE_RANGE = 5;
-const ATTACK_RANGE = 2;
-
-const KNOCKBACK_DIST = 2;
-const INVULN_DURATION = 2;    // seconds after paralysis ends
+// ─── Static data ──────────────────────────────────────────────────────────────
 
 const CORE_TILES = [
   { x: 7, y: 7 },
@@ -60,7 +45,7 @@ export class ServerEmulator {
   start(): void {
     EventBus.on(Events.PLAYER_INPUT, this.onPlayerInput, this);
     EventBus.emit(Events.SERVER_UPDATE, this.snapshot());
-    this.tickHandle = setInterval(() => this.tick(), TICK_MS);
+    this.tickHandle = setInterval(() => this.tick(), SERVER.TICK_MS);
   }
 
   stop(): void {
@@ -84,8 +69,20 @@ export class ServerEmulator {
     if (this.state.room.status !== 'ACTIVE') return;
 
     this.state.coreHit = false;
+    this.processPlayerInput();
+    this.updateRoomTimer();
+    this.handleStatusEffects();
+    this.updateStalkers();
+    this.state.rays = [];
+    this.processCombat();
+    this.checkWinLoss();
 
-    // 1. Player input
+    EventBus.emit(Events.SERVER_UPDATE, this.snapshot());
+  }
+
+  // ─── Private: tick sub-steps ────────────────────────────────────────────────
+
+  private processPlayerInput(): void {
     if (this.pendingDir !== null) {
       this.applyMove(this.pendingDir);
       this.pendingDir = null;
@@ -94,50 +91,46 @@ export class ServerEmulator {
       this.applyAction();
       this.pendingAction = false;
     }
+  }
 
-    // 2. Timers
+  private updateRoomTimer(): void {
     this.state.room.timer = Math.max(
       0,
-      +(this.state.room.timer - TICK_MS / 1000).toFixed(2),
+      +(this.state.room.timer - SERVER.TICK_MS / 1000).toFixed(2),
     );
+  }
 
-    if (this.state.player.status === 'PARALYZED') {
-      this.state.player.pTimer -= TICK_MS / 1000;
-      if (this.state.player.pTimer <= 0) {
-        this.state.player.status = 'NORMAL';
-        this.state.player.pTimer = 0;
-        this.state.player.isInvulnerable = true;
-        this.state.player.iTimer = INVULN_DURATION;
+  private handleStatusEffects(): void {
+    const p = this.state.player;
+
+    if (p.status === 'PARALYZED') {
+      p.pTimer -= SERVER.TICK_MS / 1000;
+      if (p.pTimer <= 0) {
+        p.status = 'NORMAL';
+        p.pTimer = 0;
+        p.isInvulnerable = true;
+        p.iTimer = SERVER.INVULN_DURATION;
       }
+      return;
     }
 
-    if (this.state.player.isInvulnerable) {
-      this.state.player.iTimer -= TICK_MS / 1000;
-      if (this.state.player.iTimer <= 0) {
-        this.state.player.isInvulnerable = false;
-        this.state.player.iTimer = 0;
-      }
-    }
+    if (!p.isInvulnerable) return;
 
-    // 3. Enemy FSM + movement
+    p.iTimer -= SERVER.TICK_MS / 1000;
+    if (p.iTimer <= 0) {
+      p.isInvulnerable = false;
+      p.iTimer = 0;
+    }
+  }
+
+  private updateStalkers(): void {
     this.updateEnemyFSM();
     this.moveEnemies();
+  }
 
-    // 4. LOS / paralysis check
-    this.state.rays = [];
-    if (
-      this.state.player.status === 'NORMAL' &&
-      !this.state.player.isInvulnerable
-    ) {
-      this.checkParalysis();
-    }
-
-    // 5. Win / loss conditions
+  private checkWinLoss(): void {
     if (this.state.room.coreHP <= 0) this.state.room.status = 'WON';
     else if (this.state.room.timer <= 0) this.state.room.status = 'LOST';
-
-    // 6. Broadcast
-    EventBus.emit(Events.SERVER_UPDATE, this.snapshot());
   }
 
   // ─── Private: game logic ────────────────────────────────────────────────────
@@ -158,7 +151,7 @@ export class ServerEmulator {
     if (this.isAdjacentToCore(x, y)) {
       this.state.room.coreHP = Math.max(
         0,
-        this.state.room.coreHP - CORE_DAMAGE,
+        this.state.room.coreHP - SERVER.CORE_DAMAGE,
       );
       this.state.coreHit = true;
     }
@@ -184,28 +177,31 @@ export class ServerEmulator {
       }
 
       const dist = Math.abs(e.x - px) + Math.abs(e.y - py);
-
-      const sameRow = e.y === py;
-      const sameCol = e.x === px;
       const dx = Math.abs(e.x - px);
       const dy = Math.abs(e.y - py);
       const inAttackRange =
-        (sameRow && dx > 0 && dx <= ATTACK_RANGE) ||
-        (sameCol && dy > 0 && dy <= ATTACK_RANGE);
+        (e.y === py && dx > 0 && dx <= SERVER.ATTACK_RANGE) ||
+        (e.x === px && dy > 0 && dy <= SERVER.ATTACK_RANGE);
 
       if (inAttackRange && this.hasLOS(e.x, e.y, px, py)) {
         e.state = 'ATTACK';
-      } else if (dist <= CHASE_RANGE) {
-        e.state = 'CHASE';
-      } else {
-        e.state = 'PATROL';
+        continue;
       }
+
+      if (dist <= SERVER.CHASE_RANGE) {
+        e.state = 'CHASE';
+        continue;
+      }
+
+      e.state = 'PATROL';
     }
   }
 
   private moveEnemies(): void {
     const patrolInterval =
-      this.state.room.coreHP < 30 ? ENEMY_MOVE_FAST : ENEMY_MOVE_NORMAL;
+      this.state.room.coreHP < 30
+        ? SERVER.ENEMY_MOVE_FAST
+        : SERVER.ENEMY_MOVE_NORMAL;
     const dirs: Direction[] = ['up', 'down', 'left', 'right'];
 
     for (let i = 0; i < this.state.enemies.length; i++) {
@@ -213,7 +209,8 @@ export class ServerEmulator {
 
       if (e.state === 'ATTACK') continue;
 
-      const interval = e.state === 'CHASE' ? CHASE_INTERVAL : patrolInterval;
+      const interval =
+        e.state === 'CHASE' ? SERVER.CHASE_INTERVAL : patrolInterval;
 
       this.enemyCounters[i]++;
       if (this.enemyCounters[i] < interval) continue;
@@ -221,19 +218,20 @@ export class ServerEmulator {
 
       if (e.state === 'CHASE') {
         this.moveTowardsPlayer(e);
-      } else {
-        const shuffled = [...dirs];
-        for (let j = shuffled.length - 1; j > 0; j--) {
-          const k = Math.floor(Math.random() * (j + 1));
-          [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
-        }
-        for (const dir of shuffled) {
-          const next = this.step(e.x, e.y, dir);
-          if (!this.isBlocked(next.x, next.y)) {
-            e.x = next.x;
-            e.y = next.y;
-            break;
-          }
+        continue;
+      }
+
+      const shuffled = [...dirs];
+      for (let j = shuffled.length - 1; j > 0; j--) {
+        const k = Math.floor(Math.random() * (j + 1));
+        [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
+      }
+      for (const dir of shuffled) {
+        const next = this.step(e.x, e.y, dir);
+        if (!this.isBlocked(next.x, next.y)) {
+          e.x = next.x;
+          e.y = next.y;
+          break;
         }
       }
     }
@@ -263,9 +261,12 @@ export class ServerEmulator {
     }
   }
 
-  // ─── Paralysis + Knockback ──────────────────────────────────────────────────
+  // ─── Combat: LOS rays + paralysis ───────────────────────────────────────────
 
-  private checkParalysis(): void {
+  private processCombat(): void {
+    if (this.state.player.status !== 'NORMAL') return;
+    if (this.state.player.isInvulnerable) return;
+
     const { x: px, y: py } = this.state.player;
 
     for (const enemy of this.state.enemies) {
@@ -273,26 +274,24 @@ export class ServerEmulator {
 
       const dx = Math.abs(enemy.x - px);
       const dy = Math.abs(enemy.y - py);
+      const sameRow = enemy.y === py && dx > 0 && dx <= SERVER.ATTACK_RANGE;
+      const sameCol = enemy.x === px && dy > 0 && dy <= SERVER.ATTACK_RANGE;
 
-      const sameRow = enemy.y === py && dx > 0 && dx <= ATTACK_RANGE;
-      const sameCol = enemy.x === px && dy > 0 && dy <= ATTACK_RANGE;
+      if (!(sameRow || sameCol)) continue;
+      if (!this.hasLOS(enemy.x, enemy.y, px, py)) continue;
 
-      if ((sameRow || sameCol) && this.hasLOS(enemy.x, enemy.y, px, py)) {
-        this.state.player.status = 'PARALYZED';
-        this.state.player.pTimer = PARALYSIS_DURATION;
-        this.state.rays.push({
-          fromX: enemy.x,
-          fromY: enemy.y,
-          toX: px,
-          toY: py,
-        });
+      this.state.player.status = 'PARALYZED';
+      this.state.player.pTimer = SERVER.PARALYSIS_DURATION;
+      this.state.rays.push({
+        fromX: enemy.x,
+        fromY: enemy.y,
+        toX: px,
+        toY: py,
+      });
 
-        this.applyKnockback(enemy.x, enemy.y);
-
-        enemy.state = 'PATROL';
-
-        return;
-      }
+      this.applyKnockback(enemy.x, enemy.y);
+      enemy.state = 'PATROL';
+      return;
     }
   }
 
@@ -301,20 +300,16 @@ export class ServerEmulator {
     const dx = p.x - ex;
     const dy = p.y - ey;
 
-    let dirX = 0;
-    let dirY = 0;
-
-    if (dx !== 0) dirX = Math.sign(dx);
-    if (dy !== 0) dirY = Math.sign(dy);
-
+    let dirX = dx !== 0 ? Math.sign(dx) : 0;
+    let dirY = dy !== 0 ? Math.sign(dy) : 0;
     if (dirX === 0 && dirY === 0) dirX = 1;
 
     let finalX = p.x;
     let finalY = p.y;
 
-    for (let step = 1; step <= KNOCKBACK_DIST; step++) {
-      const nx = p.x + dirX * step;
-      const ny = p.y + dirY * step;
+    for (let s = 1; s <= SERVER.KNOCKBACK_DIST; s++) {
+      const nx = p.x + dirX * s;
+      const ny = p.y + dirY * s;
       if (this.isBlocked(nx, ny)) break;
       finalX = nx;
       finalY = ny;
@@ -390,7 +385,11 @@ export class ServerEmulator {
 
   private createInitialState(): GameState {
     return {
-      room: { status: 'ACTIVE', timer: TIMER_DURATION, coreHP: CORE_HP_MAX },
+      room: {
+        status: 'ACTIVE',
+        timer: SERVER.TIMER_DURATION,
+        coreHP: SERVER.CORE_HP_MAX,
+      },
       player: {
         x: 1,
         y: 7,

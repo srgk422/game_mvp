@@ -168,3 +168,25 @@
 - Удар по ядру (Space/E): белая вспышка поверх ядра с fade-out (200мс) + тряска Graphics (40мс × 3)
 - Depth sorting: `depth = screenY` для всех объектов (игрок, враги, ядро)
 - Ядро блокирует LOS для сталкеров (уже было, сохранено)
+
+---
+
+## [0.5.1] — 2026-04-14 (`main`)
+
+### Code Cleanup & Architectural Alignment — рефакторинг без изменения поведения
+
+**Изменены файлы:**
+
+| Файл | Что изменилось |
+|---|---|
+| `src/types/game.ts` | Добавлен экспортируемый объект `SERVER` — все игровые константы симуляции вынесены из `ServerEmulator.ts` в единый конфиг |
+| `src/core/ServerEmulator.ts` | Декомпозиция `tick()`: выделены `processPlayerInput()`, `updateRoomTimer()`, `handleStatusEffects()`, `updateStalkers()`, `processCombat()`, `checkWinLoss()`; `checkParalysis()` переименована в `processCombat()` с early returns; `if/else if/else` в `updateEnemyFSM()` заменён на `continue`-цепочку; все магические числа заменены ссылками на `SERVER.*` |
+| `src/scenes/Game.ts` | Добавлены константные объекты `VFX` и `COLORS`; `drawRays()` → `drawStalkerRays()`; `playCoreHitVFX()` → `applyCoreVFX()`; `updateBlink()` → `tickInvulnerabilityBlink()`; визуальная логика игрока вынесена из `syncPlayer()` в `updatePlayerVisuals(state)` |
+
+**Соглашения:**
+- `SERVER` в `types/game.ts` — единый источник истины для всех численных параметров симуляции
+- `VFX` / `COLORS` в `Game.ts` — именованные константы для всех magic-numbers рендеринга и цветов
+- `tick()` в `ServerEmulator` теперь читается как линейная последовательность шагов без вложенности
+- Изометрия (`toIso()`), Screen-Aligned управление (`playerStep()`/`step()`), depth sorting (`setDepth(pos.y)`) — не затронуты
+
+---

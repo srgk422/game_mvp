@@ -171,6 +171,41 @@
 
 ---
 
+## [0.6.0] — 2026-04-14 (`main`)
+
+### Тестовая среда и Unit-тесты ServerEmulator
+
+**Добавлены файлы:**
+
+| Файл | Назначение |
+|---|---|
+| `src/__tests__/emulator.test.ts` | 18 unit-тестов для ключевых игровых механик |
+
+**Изменены файлы:**
+
+| Файл | Что изменилось |
+|---|---|
+| `package.json` | Добавлены скрипты `"test": "vitest"` и `"test:ui": "vitest --ui"` |
+| `vite.config.ts` | Импорт `defineConfig` перенесён из `vite` в `vitest/config`; добавлена секция `test` с `environment: 'node'`, `globals: true`, include → `src/__tests__/**` |
+| `tsconfig.json` | Добавлен тип `vitest/globals` — `describe`/`it`/`expect` без явных импортов |
+
+**Тестовое покрытие (18 тестов, 5 групп):**
+
+| Группа | Что проверяется |
+|---|---|
+| Movement & Isometric Logic | Все 4 направления Screen-Aligned управления (W/A/S/D → диагональные логические шаги) |
+| Collisions | Блокировка Core-тайлов, блокировка границ сетки (0,0 и 14,14) |
+| Combat — LOS & Rays | Генерация луча при атаке по одной линии; прямой тест `hasLOS` с блокировкой Core; отсутствие атаки по диагонали |
+| Stun-Lock Protection | Статус PARALYZED, Knockback, переход PARALYZED→isInvulnerable, истечение I-Frames, Anti-Dogpiling |
+| Core Attack | Урон при adjacency, отсутствие урона вне зоны, отсутствие урона при параличе |
+
+**Архитектурные решения:**
+- `EventBus` замокан через `vi.mock` с Node `EventEmitter` под капотом — изолирует тесты от Phaser полностью
+- Внутреннее состояние доступно через `(server as any).state` для точной расстановки игровых объектов
+- `vi.useFakeTimers()` + `vi.advanceTimersByTime(100)` — детерминированный контроль тиков без реального ожидания
+
+---
+
 ## [0.5.1] — 2026-04-14 (`main`)
 
 ### Code Cleanup & Architectural Alignment — рефакторинг без изменения поведения
